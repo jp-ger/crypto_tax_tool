@@ -4,16 +4,21 @@ from decimal import Decimal
 from crypto_tax_tool.database.loaders import load_latest_balance_snapshot, load_transactions
 from crypto_tax_tool.database.sqlite_store import (
     count_balance_rows,
+    count_fifo_lots,
+    count_fifo_usages,
     count_prices,
     count_transactions,
     get_cached_price,
     initialize_sqlite,
     save_balance_snapshot,
+    save_fifo_lots,
+    save_fifo_usages,
     save_price,
     save_transactions,
 )
 from crypto_tax_tool.models.balances import AssetBalance, BalanceSnapshot
 from crypto_tax_tool.models.enums import TaxCategory, TradeSide, TransactionKind, TransactionSource
+from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
 from crypto_tax_tool.models.prices import HistoricalPrice
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 
@@ -116,3 +121,30 @@ def test_save_and_read_price(tmp_path, monkeypatch) -> None:
     cached = get_cached_price("BTC", "EUR", timestamp)
     assert cached is not None
     assert cached.price == Decimal("90000")
+
+
+def test_save_fifo_lots_and_usages(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
+    lot = AssetLot(
+        id="lot1",
+        asset="BTC",
+        acquired_at=datetime(2024, 1, 1, tzinfo=UTC),
+        quantity=Decimal("0.1"),
+        remaining_quantity=Decimal("0.05"),
+        cost_basis_eur=Decimal("1500"),
+        source_transaction_id="buy1",
+    )
+    usage = LotUsage(
+        lot_id="lot1",
+        asset="BTC",
+        acquired_at=datetime(2024, 1, 1, tzinfo=UTC),
+        used_at=datetime(2025, 1, 1, tzinfo=UTC),
+        quantity=Decimal("0.05"),
+        cost_basis_eur=Decimal("1500"),
+        value_eur=Decimal("2500"),
+    )
+
+    assert save_fifo_lots([lot]) == 1
+    assert save_fifo_usages("sell1", [usage]) == 1
+    assert count_fifo_lots() == 1
+    assert count_fifo_usages() == 1
