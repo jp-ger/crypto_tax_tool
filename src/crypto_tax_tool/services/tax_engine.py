@@ -40,11 +40,17 @@ class TaxCalculationResult:
 class TaxEngine:
     """Build FIFO lots and disposal results from normalized transactions."""
 
-    def __init__(self, price_service: HistoricalPriceService) -> None:
+    def __init__(
+        self,
+        price_service: HistoricalPriceService,
+        initial_lots: list[AssetLot] | None = None,
+    ) -> None:
         self.price_service = price_service
         self.fee_service = FeeService(price_service)
         self.rule_classifier = GermanTaxRuleClassifier()
         self.fifo = FifoEngine()
+        for lot in sorted(initial_lots or [], key=lambda item: item.acquired_at):
+            self.fifo.add_lot(lot)
 
     def calculate(self, transactions: list[NormalizedTransaction]) -> TaxCalculationResult:
         disposals: list[DisposalResult] = []
