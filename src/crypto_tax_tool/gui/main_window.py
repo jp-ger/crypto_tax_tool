@@ -20,6 +20,7 @@ from crypto_tax_tool.database.manual_store import count_manual_entries, save_man
 from crypto_tax_tool.database.sqlite_store import count_balance_rows, count_transactions
 from crypto_tax_tool.gui.sync_worker import SyncWorker
 from crypto_tax_tool.models.manual_entries import ManualLotEntry, ManualPriceEntry
+from crypto_tax_tool.services.config_service import ConfigService
 from crypto_tax_tool.services.report_service import ReportGenerationService, ReportValidationError
 from crypto_tax_tool.updater import check_for_updates
 
@@ -28,12 +29,24 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Crypto Tax Tool")
-        self.resize(950, 810)
+        self.resize(1050, 900)
         self.sync_thread: QThread | None = None
         self.sync_worker: SyncWorker | None = None
+        self.config_service = ConfigService()
 
         self.status_label = QLabel("Ready. Use read-only API credentials.")
         self.count_label = QLabel(self._local_count_text())
+
+        api_key, api_secret = self.config_service.load_binance_credentials()
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("Binance API Key (read-only)")
+        self.api_key_input.setText(api_key)
+        self.api_secret_input = QLineEdit()
+        self.api_secret_input.setPlaceholderText("Binance API Secret")
+        self.api_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_secret_input.setText(api_secret)
+        self.save_credentials_button = QPushButton("Save Binance API credentials")
+        self.save_credentials_button.clicked.connect(self._save_api_credentials)
 
         self.start_date = QDateEdit()
         self.start_date.setCalendarPopup(True)
@@ -100,6 +113,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Crypto Tax Tool"))
         layout.addWidget(self.status_label)
         layout.addWidget(self.count_label)
+
+        layout.addWidget(QLabel("Binance API credentials"))
+        api_row = QHBoxLayout()
+        api_row.addWidget(self.api_key_input)
+        api_row.addWidget(self.api_secret_input)
+        api_row.addWidget(self.save_credentials_button)
+        layout.addLayout(api_row)
+        layout.addWidget(QLabel("Important: create the Binance key with read-only permissions only. Do not enable trading or withdrawals."))
+
         layout.addWidget(QLabel("Sync / report start date"))
         layout.addWidget(self.start_date)
         layout.addWidget(QLabel("Sync / report end date"))
@@ -153,6 +175,19 @@ class MainWindow(QMainWindow):
         start = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
         end = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
         return start, end
+
+    def _save_api_credentials(self) -> None:
+        try:
+            path = self.config_service.save_binance_credentials(
+                self.api_key_input.text(),
+                self.api_secret_input.text(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Could not save API credentials: {exc}")
+            self._append_log(f"Could not save API credentials: {exc}")
+        else:
+            self.status_label.setText("Binance API credentials saved.")
+            self._append_log(f"Binance API credentials saved to {path}.")
 
     def _test_binance_connection(self) -> None:
         try:
