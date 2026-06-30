@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from crypto_tax_tool.models.balances import BalanceSnapshot
+from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
 from crypto_tax_tool.models.prices import HistoricalPrice
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.settings import get_settings
@@ -73,6 +74,34 @@ CREATE TABLE IF NOT EXISTS historical_prices (
 
 CREATE INDEX IF NOT EXISTS idx_historical_prices_lookup
 ON historical_prices(asset, quote_asset, timestamp);
+
+CREATE TABLE IF NOT EXISTS fifo_lots (
+    id TEXT PRIMARY KEY,
+    asset TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    remaining_quantity TEXT NOT NULL,
+    cost_basis_eur TEXT NOT NULL,
+    source_transaction_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fifo_lots_asset ON fifo_lots(asset);
+CREATE INDEX IF NOT EXISTS idx_fifo_lots_acquired_at ON fifo_lots(acquired_at);
+
+CREATE TABLE IF NOT EXISTS fifo_usages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    disposal_transaction_id TEXT NOT NULL,
+    lot_id TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    used_at TEXT NOT NULL,
+    quantity TEXT NOT NULL,
+    cost_basis_eur TEXT NOT NULL,
+    value_eur TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fifo_usages_disposal ON fifo_usages(disposal_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_fifo_usages_lot ON fifo_usages(lot_id);
 """
 
 
@@ -159,6 +188,60 @@ def save_balance_snapshot(snapshot: BalanceSnapshot) -> int:
     return len(snapshot.balances)
 
 
+def save_fifo_lots(lots: list[AssetLot]) -> int:
+    with connect() as conn:
+        conn.execute("DELETE FROM fifo_lots")
+        for lot in lots:
+            conn.execute(
+                """
+                INSERT INTO fifo_lots (
+                    id, asset, acquired_at, quantity, remaining_quantity,
+                    cost_basis_eur, source_transaction_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lot.id,
+                    lot.asset,
+                    lot.acquired_at.isoformat(),
+                    str(lot.quantity),
+                    str(lot.remaining_quantity),
+                    str(lot.cost_basis_eur),
+                    lot.source_transaction_id,
+                ),
+            )
+        conn.commit()
+    return len(lots)
+
+
+def save_fifo_usages(disposal_transaction_id: str, usages: list[LotUsage]) -> int:
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM fifo_usages WHERE disposal_transaction_id = ?",
+            (disposal_transaction_id,),
+        )
+        for usage in usages:
+            conn.execute(
+                """
+                INSERT INTO fifo_usages (
+                    disposal_transaction_id, lot_id, asset, acquired_at, used_at,
+                    quantity, cost_basis_eur, value_eur
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    disposal_transaction_id,
+                    usage.lot_id,
+                    usage.asset,
+                    usage.acquired_at.isoformat(),
+                    usage.used_at.isoformat(),
+                    str(usage.quantity),
+                    str(usage.cost_basis_eur),
+                    str(usage.value_eur),
+                ),
+            )
+        conn.commit()
+    return len(usages)
+
+
 def save_price(price: HistoricalPrice) -> bool:
     with connect() as conn:
         cursor = conn.execute(
@@ -243,4 +326,16 @@ def count_balance_rows() -> int:
 def count_prices() -> int:
     with connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM historical_prices").fetchone()
+        return int(row["n"])
+
+
+def count_fifo_lots() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM fifo_lots").fetchone()
+        return int(row["n"])
+
+
+def count_fifo_usages() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM fifo_usages").fetchone()
         return int(row["n"])
