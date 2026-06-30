@@ -4,6 +4,7 @@ from decimal import Decimal
 from crypto_tax_tool.models.enums import TradeSide, TransactionKind
 from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
 from crypto_tax_tool.models.transactions import NormalizedTransaction
+from crypto_tax_tool.services.fee_service import FeeService
 from crypto_tax_tool.services.fifo_engine import FifoEngine
 from crypto_tax_tool.services.pricing import HistoricalPriceService
 
@@ -15,6 +16,7 @@ class DisposalResult:
     quantity: Decimal
     proceeds_eur: Decimal
     matches: list[LotUsage]
+    fee_eur: Decimal = Decimal("0")
 
     @property
     def cost_basis_eur(self) -> Decimal:
@@ -40,6 +42,7 @@ class TaxEngine:
 
     def __init__(self, price_service: HistoricalPriceService) -> None:
         self.price_service = price_service
+        self.fee_service = FeeService(price_service)
         self.fifo = FifoEngine()
 
     def calculate(self, transactions: list[NormalizedTransaction]) -> TaxCalculationResult:
@@ -81,6 +84,7 @@ class TaxEngine:
         else:
             price = self.price_service.get_price(tx.asset, "EUR", tx.timestamp)
             cost_basis = tx.quantity * price.price
+        cost_basis += self.fee_service.fee_value_eur(tx)
         self.fifo.add_lot(
             AssetLot(
                 asset=tx.asset,
@@ -96,15 +100,18 @@ class TaxEngine:
         disposed_asset = tx.quote_asset or tx.asset
         disposed_quantity = tx.quote_quantity or tx.quantity
         if tx.asset == "EUR":
-            proceeds_eur = tx.quantity
+            gross_proceeds_eur = tx.quantity
         else:
             price = self.price_service.get_price(tx.asset, "EUR", tx.timestamp)
-            proceeds_eur = tx.quantity * price.price
-        matches = self.fifo.use(disposed_asset, disposed_quantity, proceeds_eur, tx.timestamp)
+            gross_proceeds_eur = tx.quantity * price.price
+        fee_eur = self.fee_service.fee_value_eur(tx)
+        net_proceeds_eur = gross_proceeds_eur - fee_eur
+        matches = self.fifo.use(disposed_asset, disposed_quantity, net_proceeds_eur, tx.timestamp)
         return DisposalResult(
             transaction_id=tx.id,
             asset=disposed_asset,
             quantity=disposed_quantity,
-            proceeds_eur=proceeds_eur,
+            proceeds_eur=net_proceeds_eur,
             matches=matches,
+            fee_eur=fee_eur,
         )
