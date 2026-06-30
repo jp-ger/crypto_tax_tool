@@ -3,13 +3,17 @@ from decimal import Decimal
 
 from crypto_tax_tool.database.sqlite_store import (
     count_balance_rows,
+    count_prices,
     count_transactions,
+    get_cached_price,
     initialize_sqlite,
     save_balance_snapshot,
+    save_price,
     save_transactions,
 )
 from crypto_tax_tool.models.balances import AssetBalance, BalanceSnapshot
 from crypto_tax_tool.models.enums import TaxCategory, TradeSide, TransactionKind, TransactionSource
+from crypto_tax_tool.models.prices import HistoricalPrice
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 
 
@@ -61,3 +65,23 @@ def test_save_balance_snapshot(tmp_path, monkeypatch) -> None:
 
     assert save_balance_snapshot(snapshot) == 2
     assert count_balance_rows() == 2
+
+
+def test_save_and_read_price(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
+    timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+    price = HistoricalPrice(
+        asset="BTC",
+        quote_asset="EUR",
+        timestamp=timestamp,
+        price=Decimal("90000"),
+        provider="test",
+        pair="BTCEUR",
+    )
+
+    assert save_price(price) is True
+    assert save_price(price) is False
+    assert count_prices() == 1
+    cached = get_cached_price("BTC", "EUR", timestamp)
+    assert cached is not None
+    assert cached.price == Decimal("90000")
