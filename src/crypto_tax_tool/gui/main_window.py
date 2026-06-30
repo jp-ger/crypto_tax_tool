@@ -20,13 +20,14 @@ from crypto_tax_tool.database.manual_store import count_manual_entries, save_man
 from crypto_tax_tool.database.sqlite_store import count_balance_rows, count_transactions
 from crypto_tax_tool.gui.sync_worker import SyncWorker
 from crypto_tax_tool.models.manual_entries import ManualLotEntry, ManualPriceEntry
+from crypto_tax_tool.services.report_service import ReportGenerationService
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Crypto Tax Tool")
-        self.resize(950, 760)
+        self.resize(950, 780)
         self.sync_thread: QThread | None = None
         self.sync_worker: SyncWorker | None = None
 
@@ -48,6 +49,9 @@ class MainWindow(QMainWindow):
 
         self.sync_button = QPushButton("Start Binance sync")
         self.sync_button.clicked.connect(self._run_sync)
+
+        self.report_button = QPushButton("Create tax report")
+        self.report_button.clicked.connect(self._create_tax_report)
 
         self.refresh_button = QPushButton("Refresh local counts")
         self.refresh_button.clicked.connect(self._refresh_count)
@@ -98,6 +102,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.end_date)
         layout.addWidget(self.test_button)
         layout.addWidget(self.sync_button)
+        layout.addWidget(self.report_button)
         layout.addWidget(self.refresh_button)
 
         layout.addWidget(QLabel("Manual EUR price"))
@@ -148,6 +153,23 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Binance API is reachable.")
             self._append_log("Binance API is reachable.")
+
+    def _create_tax_report(self) -> None:
+        self.status_label.setText("Creating tax report.")
+        self.report_button.setEnabled(False)
+        try:
+            result = ReportGenerationService().generate_tax_report()
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText(f"Report failed: {exc}")
+            self._append_log(f"Report failed: {exc}")
+        else:
+            self.status_label.setText("Report created.")
+            self._append_log(
+                f"Report created: {result.output_dir} | transactions: {result.transactions}, "
+                f"disposals: {result.disposals}, open lots: {result.open_lots}"
+            )
+        finally:
+            self.report_button.setEnabled(True)
 
     def _save_manual_price(self) -> None:
         try:
