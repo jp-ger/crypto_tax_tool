@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from crypto_tax_tool.models.enums import TradeSide, TransactionKind
 from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.services.fee_service import FeeService
 from crypto_tax_tool.services.fifo_engine import FifoEngine
 from crypto_tax_tool.services.pricing import HistoricalPriceService
+from crypto_tax_tool.services.tax_rules import GermanTaxRuleClassifier
 
 
 @dataclass(frozen=True)
@@ -43,25 +43,23 @@ class TaxEngine:
     def __init__(self, price_service: HistoricalPriceService) -> None:
         self.price_service = price_service
         self.fee_service = FeeService(price_service)
+        self.rule_classifier = GermanTaxRuleClassifier()
         self.fifo = FifoEngine()
 
     def calculate(self, transactions: list[NormalizedTransaction]) -> TaxCalculationResult:
         disposals: list[DisposalResult] = []
         for tx in sorted(transactions, key=lambda item: item.timestamp):
-            if tx.kind not in {TransactionKind.TRADE, TransactionKind.CONVERT}:
-                self._handle_non_trade_inflow(tx)
-                continue
-
-            if tx.side == TradeSide.BUY:
+            rule = self.rule_classifier.classify(tx)
+            if rule.action == "income_lot":
+                self._add_income_lot(tx)
+            elif rule.action == "acquisition_lot":
                 self._add_buy_lot(tx)
-            elif tx.side == TradeSide.SELL:
+            elif rule.action == "disposal":
                 disposals.append(self._create_disposal(tx))
 
         return TaxCalculationResult(disposals=disposals, open_lots=list(self.fifo.open_lots()))
 
-    def _handle_non_trade_inflow(self, tx: NormalizedTransaction) -> None:
-        if tx.kind not in {TransactionKind.REWARD, TransactionKind.INCOME, TransactionKind.DEPOSIT}:
-            return
+    def _add_income_lot(self, tx: NormalizedTransaction) -> None:
         price = self.price_service.get_price(tx.asset, "EUR", tx.timestamp)
         cost_basis = tx.quantity * price.price
         self.fifo.add_lot(
