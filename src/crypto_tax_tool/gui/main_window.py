@@ -20,7 +20,7 @@ from crypto_tax_tool.database.manual_store import count_manual_entries, save_man
 from crypto_tax_tool.database.sqlite_store import count_balance_rows, count_transactions
 from crypto_tax_tool.gui.sync_worker import SyncWorker
 from crypto_tax_tool.models.manual_entries import ManualLotEntry, ManualPriceEntry
-from crypto_tax_tool.services.report_service import ReportGenerationService
+from crypto_tax_tool.services.report_service import ReportGenerationService, ReportValidationError
 
 
 class MainWindow(QMainWindow):
@@ -159,6 +159,11 @@ class MainWindow(QMainWindow):
         self.report_button.setEnabled(False)
         try:
             result = ReportGenerationService().generate_tax_report()
+        except ReportValidationError as exc:
+            self.status_label.setText("Report validation failed.")
+            self._append_log("Report validation failed:")
+            for issue in exc.validation_report.errors:
+                self._append_log(f"ERROR {issue.code}: {issue.message}")
         except Exception as exc:  # noqa: BLE001
             self.status_label.setText(f"Report failed: {exc}")
             self._append_log(f"Report failed: {exc}")
@@ -168,6 +173,8 @@ class MainWindow(QMainWindow):
                 f"Report created: {result.output_dir} | transactions: {result.transactions}, "
                 f"disposals: {result.disposals}, open lots: {result.open_lots}"
             )
+            for issue in result.validation_report.warnings:
+                self._append_log(f"WARNING {issue.code}: {issue.message}")
         finally:
             self.report_button.setEnabled(True)
 
