@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from crypto_tax_tool.database.sqlite_store import connect
+from crypto_tax_tool.models.fifo_state import AssetLot
 from crypto_tax_tool.models.manual_entries import ManualChangeLogEntry, ManualLotEntry, ManualPriceEntry
 from crypto_tax_tool.models.prices import HistoricalPrice
 
@@ -135,6 +136,30 @@ def get_manual_price(asset: str, quote_asset: str, timestamp: datetime) -> Histo
         provider="manual",
         pair=f"{asset}{quote_asset}",
     )
+
+
+def load_manual_lots() -> list[AssetLot]:
+    initialize_manual_store()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, asset, acquired_at, quantity, cost_basis_eur, source_reference
+            FROM manual_lots
+            ORDER BY acquired_at, id
+            """
+        ).fetchall()
+    return [
+        AssetLot(
+            id=f"manual:{row['id']}",
+            asset=row["asset"],
+            acquired_at=datetime.fromisoformat(row["acquired_at"]),
+            quantity=Decimal(row["quantity"]),
+            remaining_quantity=Decimal(row["quantity"]),
+            cost_basis_eur=Decimal(row["cost_basis_eur"]),
+            source_transaction_id=row["source_reference"] or f"manual:{row['id']}",
+        )
+        for row in rows
+    ]
 
 
 def count_manual_entries() -> int:
