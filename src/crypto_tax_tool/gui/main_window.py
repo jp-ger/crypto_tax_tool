@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
 from crypto_tax_tool.api.binance.client import BinanceClient
+from crypto_tax_tool.database.sqlite_store import count_transactions
 
 
 class MainWindow(QMainWindow):
@@ -10,18 +11,29 @@ class MainWindow(QMainWindow):
         self.resize(900, 600)
 
         self.status_label = QLabel("Ready. Use read-only API credentials.")
+        self.count_label = QLabel(self._transaction_count_text())
         self.test_button = QPushButton("Test Binance connection")
         self.test_button.clicked.connect(self._test_binance_connection)
+        self.refresh_button = QPushButton("Refresh local transaction count")
+        self.refresh_button.clicked.connect(self._refresh_count)
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Crypto Tax Tool"))
         layout.addWidget(self.status_label)
+        layout.addWidget(self.count_label)
         layout.addWidget(self.test_button)
+        layout.addWidget(self.refresh_button)
         layout.addStretch()
 
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+    def _transaction_count_text(self) -> str:
+        return f"Local transactions: {count_transactions()}"
+
+    def _refresh_count(self) -> None:
+        self.count_label.setText(self._transaction_count_text())
 
     def _test_binance_connection(self) -> None:
         try:
