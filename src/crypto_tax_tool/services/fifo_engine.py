@@ -41,6 +41,7 @@ class FifoEngine:
                     quantity=used_quantity,
                     cost_basis_eur=cost_share,
                     value_eur=value_share,
+                    source_transaction_id=lot.source_transaction_id,
                 )
             )
             lot.remaining_quantity -= used_quantity
