@@ -194,6 +194,8 @@ class MainWindow(QMainWindow):
                 f"Report created: {result.output_dir} | transactions: {result.transactions}, "
                 f"disposals: {result.disposals}, open lots: {result.open_lots}"
             )
+            if result.backup_path:
+                self._append_log(f"Backup before report: {result.backup_path}")
             for issue in result.validation_report.warnings:
                 self._append_log(f"WARNING {issue.code}: {issue.message}")
         finally:
@@ -261,6 +263,8 @@ class MainWindow(QMainWindow):
             f"Sync completed. Loaded: {result.loaded}, inserted: {result.inserted}, "
             f"balance rows: {result.balance_rows}"
         )
+        if result.backup_path:
+            self._append_log(f"Backup before sync: {result.backup_path}")
         self._refresh_count()
 
     def _sync_failed(self, message: str) -> None:
