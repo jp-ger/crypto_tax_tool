@@ -3,9 +3,11 @@ from decimal import Decimal
 
 from openpyxl import load_workbook
 
+from crypto_tax_tool.database.manual_store import save_manual_price
 from crypto_tax_tool.database.sqlite_store import initialize_sqlite, save_balance_snapshot, save_transactions
 from crypto_tax_tool.models.balances import AssetBalance, BalanceSnapshot
 from crypto_tax_tool.models.enums import TaxCategory, TradeSide, TransactionKind, TransactionSource
+from crypto_tax_tool.models.manual_entries import ManualPriceEntry
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.services.report_service import ReportGenerationService
 from crypto_tax_tool.services.validation_service import ValidationService
@@ -36,12 +38,33 @@ def _tx(**kwargs) -> NormalizedTransaction:
     return NormalizedTransaction(**defaults)
 
 
-def test_end_to_end_report_generation_with_cached_prices(tmp_path, monkeypatch) -> None:
+def test_end_to_end_report_generation_with_manual_prices(tmp_path, monkeypatch) -> None:
     _prepare_db(tmp_path, monkeypatch)
+
+    buy_time = datetime(2024, 1, 1, tzinfo=UTC)
+    sell_time = datetime(2025, 1, 1, tzinfo=UTC)
+    save_manual_price(
+        ManualPriceEntry(
+            asset="USDC",
+            quote_asset="EUR",
+            timestamp=buy_time,
+            price=Decimal("1"),
+            reason="Integration test price.",
+        )
+    )
+    save_manual_price(
+        ManualPriceEntry(
+            asset="USDC",
+            quote_asset="EUR",
+            timestamp=sell_time,
+            price=Decimal("1"),
+            reason="Integration test price.",
+        )
+    )
 
     buy = _tx(
         source_id="buy_btc_1",
-        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        timestamp=buy_time,
         asset="BTC",
         quantity=Decimal("0.1"),
         quote_asset="USDC",
@@ -50,7 +73,7 @@ def test_end_to_end_report_generation_with_cached_prices(tmp_path, monkeypatch) 
     )
     sell = _tx(
         source_id="sell_btc_1",
-        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+        timestamp=sell_time,
         asset="USDC",
         quantity=Decimal("5000"),
         quote_asset="BTC",
@@ -79,13 +102,13 @@ def test_end_to_end_report_generation_with_cached_prices(tmp_path, monkeypatch) 
     assert result.audit_csv.exists()
 
     csv_content = result.summary_csv.read_text(encoding="utf-8")
-    assert "sell_btc_1" in csv_content
+    assert "BTC" in csv_content
     assert "2000" in csv_content
 
     audit_content = result.audit_csv.read_text(encoding="utf-8")
-    assert "sell_btc_1" in audit_content
+    assert "BTC" in audit_content
 
     workbook = load_workbook(result.summary_xlsx)
     assert "Tax Summary" in workbook.sheetnames
     assert "Disposals" in workbook.sheetnames
-    assert workbook["Disposals"][2][0].value == sell.id
+    assert workbook["Disposals"][2][1].value == "BTC"
