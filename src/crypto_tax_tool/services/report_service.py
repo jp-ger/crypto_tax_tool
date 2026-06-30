@@ -11,7 +11,7 @@ from crypto_tax_tool.services.audit_service import AuditTrailService
 from crypto_tax_tool.services.backup_service import BackupService
 from crypto_tax_tool.services.binance_price_provider import BinanceHistoricalPriceProvider
 from crypto_tax_tool.services.pricing import HistoricalPriceService
-from crypto_tax_tool.services.tax_engine import TaxEngine
+from crypto_tax_tool.services.tax_engine import TaxCalculationResult, TaxEngine
 from crypto_tax_tool.services.tax_summary import TaxSummaryService
 from crypto_tax_tool.services.validation_service import ValidationReport, ValidationService
 from crypto_tax_tool.settings import get_settings
@@ -39,7 +39,12 @@ class ReportGenerationResult:
 
 
 class ReportGenerationService:
-    def generate_tax_report(self, output_dir: Path | None = None) -> ReportGenerationResult:
+    def generate_tax_report(
+        self,
+        output_dir: Path | None = None,
+        report_start: datetime | None = None,
+        report_end: datetime | None = None,
+    ) -> ReportGenerationResult:
         validation_report = ValidationService().validate()
         if not validation_report.can_create_report:
             raise ReportValidationError(validation_report)
@@ -53,7 +58,8 @@ class ReportGenerationService:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         price_service = HistoricalPriceService(providers=[BinanceHistoricalPriceProvider()])
-        calculation = TaxEngine(price_service, initial_lots=manual_lots).calculate(transactions)
+        full_calculation = TaxEngine(price_service, initial_lots=manual_lots).calculate(transactions)
+        calculation = self._filter_calculation(full_calculation, report_start, report_end)
         summary = TaxSummaryService().build_summary(calculation)
         audit_records = AuditTrailService().build_report_audit(calculation)
 
@@ -75,3 +81,23 @@ class ReportGenerationService:
             backup_path=backup.path,
             manual_lots=len(manual_lots),
         )
+
+    @staticmethod
+    def _filter_calculation(
+        calculation: TaxCalculationResult,
+        report_start: datetime | None,
+        report_end: datetime | None,
+    ) -> TaxCalculationResult:
+        if report_start is None and report_end is None:
+            return calculation
+        disposals = []
+        for disposal in calculation.disposals:
+            if disposal.disposed_at is None:
+                disposals.append(disposal)
+                continue
+            if report_start is not None and disposal.disposed_at < report_start:
+                continue
+            if report_end is not None and disposal.disposed_at > report_end:
+                continue
+            disposals.append(disposal)
+        return TaxCalculationResult(disposals=disposals, open_lots=calculation.open_lots)
