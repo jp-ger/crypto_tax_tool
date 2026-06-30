@@ -8,6 +8,7 @@ import requests
 
 from crypto_tax_tool.api.binance.http import with_retries
 from crypto_tax_tool.api.binance.normalizers import (
+    normalize_account_balances,
     normalize_convert_trade,
     normalize_reward,
     normalize_spot_trade,
@@ -17,6 +18,7 @@ from crypto_tax_tool.api.binance.pagination import extract_rows, paginate_number
 from crypto_tax_tool.api.binance.spot_sync import split_into_daily_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
+from crypto_tax_tool.models.balances import BalanceSnapshot
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.settings import get_settings
 
@@ -50,6 +52,12 @@ class BinanceClient(ExchangeClient):
             lambda: self.session.get(f"{self.base_url}/api/v3/exchangeInfo", timeout=30)
         )
         return parse_exchange_info(response.json())
+
+    def get_account_snapshot(self) -> BalanceSnapshot:
+        payload = self._signed_get("/api/v3/account")
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected account payload from Binance API.")
+        return normalize_account_balances(payload)
 
     def sync_transactions(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
