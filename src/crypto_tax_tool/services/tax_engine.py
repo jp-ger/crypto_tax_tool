@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
@@ -17,6 +18,7 @@ class DisposalResult:
     proceeds_eur: Decimal
     matches: list[LotUsage]
     fee_eur: Decimal = Decimal("0")
+    disposed_at: datetime | None = None
 
     @property
     def cost_basis_eur(self) -> Decimal:
@@ -118,4 +120,5 @@ class TaxEngine:
             proceeds_eur=net_proceeds_eur,
             matches=matches,
             fee_eur=fee_eur,
+            disposed_at=tx.timestamp,
         )
