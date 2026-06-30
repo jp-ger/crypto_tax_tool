@@ -21,13 +21,14 @@ from crypto_tax_tool.database.sqlite_store import count_balance_rows, count_tran
 from crypto_tax_tool.gui.sync_worker import SyncWorker
 from crypto_tax_tool.models.manual_entries import ManualLotEntry, ManualPriceEntry
 from crypto_tax_tool.services.report_service import ReportGenerationService, ReportValidationError
+from crypto_tax_tool.updater import check_for_updates
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Crypto Tax Tool")
-        self.resize(950, 780)
+        self.resize(950, 810)
         self.sync_thread: QThread | None = None
         self.sync_worker: SyncWorker | None = None
 
@@ -52,6 +53,9 @@ class MainWindow(QMainWindow):
 
         self.report_button = QPushButton("Create tax report")
         self.report_button.clicked.connect(self._create_tax_report)
+
+        self.update_button = QPushButton("Check for updates")
+        self.update_button.clicked.connect(self._check_for_updates)
 
         self.refresh_button = QPushButton("Refresh local counts")
         self.refresh_button.clicked.connect(self._refresh_count)
@@ -103,6 +107,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.test_button)
         layout.addWidget(self.sync_button)
         layout.addWidget(self.report_button)
+        layout.addWidget(self.update_button)
         layout.addWidget(self.refresh_button)
 
         layout.addWidget(QLabel("Manual EUR price"))
@@ -153,6 +158,22 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Binance API is reachable.")
             self._append_log("Binance API is reachable.")
+
+    def _check_for_updates(self) -> None:
+        self.update_button.setEnabled(False)
+        try:
+            info = check_for_updates()
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"Update check failed: {exc}")
+        else:
+            self._append_log(info.message)
+            if info.update_available:
+                if info.asset_url:
+                    self._append_log(f"Download: {info.asset_url}")
+                elif info.release_url:
+                    self._append_log(f"Release page: {info.release_url}")
+        finally:
+            self.update_button.setEnabled(True)
 
     def _create_tax_report(self) -> None:
         self.status_label.setText("Creating tax report.")
