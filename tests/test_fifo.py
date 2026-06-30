@@ -7,6 +7,16 @@ from crypto_tax_tool.services.fifo import FifoEngine
 from crypto_tax_tool.services.pricing import HistoricalPriceService, StaticPriceProvider
 
 
+def _prepare_db(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CRYPTO_TAX_DB_PATH", str(tmp_path / "fifo_test.sqlite3"))
+
+    from crypto_tax_tool.database.sqlite_store import initialize_sqlite
+    from crypto_tax_tool.settings import get_settings
+
+    get_settings.cache_clear()
+    initialize_sqlite()
+
+
 def _trade(source_id: str, date: datetime, side: TradeSide, qty: str, quote_qty: str):
     return NormalizedTransaction(
         source=TransactionSource.BINANCE,
@@ -24,7 +34,8 @@ def _trade(source_id: str, date: datetime, side: TradeSide, qty: str, quote_qty:
     )
 
 
-def test_fifo_matches_oldest_lot_first() -> None:
+def test_fifo_matches_oldest_lot_first(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
     price_service = HistoricalPriceService(
         providers=[StaticPriceProvider({("BTC", "EUR"): Decimal("10000")})]
     )
