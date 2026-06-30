@@ -6,7 +6,12 @@ from urllib.parse import urlencode
 
 import requests
 
-from crypto_tax_tool.api.binance.normalizers import normalize_spot_trade
+from crypto_tax_tool.api.binance.normalizers import (
+    normalize_convert_trade,
+    normalize_reward,
+    normalize_spot_trade,
+    normalize_transfer,
+)
 from crypto_tax_tool.api.binance.spot_sync import split_into_daily_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
@@ -21,7 +26,7 @@ def _to_millis(value: datetime) -> int:
 
 
 class BinanceClient(ExchangeClient):
-    """Small Binance REST client. Product-specific sync methods will be added iteratively."""
+    """Binance REST client with product-specific synchronization loaders."""
 
     base_url = "https://api.binance.com"
 
@@ -44,6 +49,15 @@ class BinanceClient(ExchangeClient):
         return parse_exchange_info(response.json())
 
     def sync_transactions(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        records.extend(self.sync_spot_trades(start, end))
+        records.extend(self.sync_convert_trades(start, end))
+        records.extend(self.sync_asset_rewards(start, end))
+        records.extend(self.sync_simple_earn_rewards(start, end))
+        records.extend(self.sync_transfers(start, end))
+        return records
+
+    def sync_spot_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         for item in self.get_exchange_symbols():
             if item.status != "TRADING":
@@ -70,6 +84,72 @@ class BinanceClient(ExchangeClient):
             for row in rows:
                 row["symbol"] = symbol.symbol
                 records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
+        return records
+
+    def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        for window in split_into_daily_windows(start, end):
+            payload = self._signed_get(
+                "/sapi/v1/convert/tradeFlow",
+                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "limit": 1000},
+            )
+            rows = payload.get("list", []) if isinstance(payload, dict) else []
+            for row in rows:
+                records.extend(normalize_convert_trade(row))
+        return records
+
+    def sync_asset_rewards(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        for window in split_into_daily_windows(start, end):
+            payload = self._signed_get(
+                "/sapi/v1/asset/assetDividend",
+                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "limit": 500},
+            )
+            rows = payload.get("rows", []) if isinstance(payload, dict) else []
+            for row in rows:
+                records.append(normalize_reward(row, product="asset_dividend", id_prefix="assetDividend"))
+        return records
+
+    def sync_simple_earn_rewards(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        endpoints = [
+            ("/sapi/v1/simple-earn/flexible/history/rewardsRecord", "simple_earn_flexible"),
+            ("/sapi/v1/simple-earn/locked/history/rewardsRecord", "simple_earn_locked"),
+        ]
+        for path, product in endpoints:
+            for window in split_into_daily_windows(start, end):
+                payload = self._signed_get(
+                    path,
+                    {
+                        "startTime": _to_millis(window.start),
+                        "endTime": _to_millis(window.end),
+                        "current": 1,
+                        "size": 100,
+                    },
+                )
+                rows = payload.get("rows", []) if isinstance(payload, dict) else []
+                for row in rows:
+                    records.append(normalize_reward(row, product=product, id_prefix=product))
+        return records
+
+    def sync_transfers(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        for window in split_into_daily_windows(start, end):
+            deposits = self._signed_get(
+                "/sapi/v1/capital/deposit/hisrec",
+                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
+            )
+            if isinstance(deposits, list):
+                for row in deposits:
+                    records.append(normalize_transfer(row, "deposit", "deposit", True))
+
+            withdrawals = self._signed_get(
+                "/sapi/v1/capital/withdraw/history",
+                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
+            )
+            if isinstance(withdrawals, list):
+                for row in withdrawals:
+                    records.append(normalize_transfer(row, "withdrawal", "withdrawal", False))
         return records
 
     def _signed_get(self, path: str, params: dict[str, object] | None = None) -> dict | list:
