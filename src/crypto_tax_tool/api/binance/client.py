@@ -13,6 +13,7 @@ from crypto_tax_tool.api.binance.normalizers import (
     normalize_spot_trade,
     normalize_transfer,
 )
+from crypto_tax_tool.api.binance.pagination import extract_rows, paginate_numbered
 from crypto_tax_tool.api.binance.spot_sync import split_into_daily_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
@@ -91,11 +92,19 @@ class BinanceClient(ExchangeClient):
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         for window in split_into_daily_windows(start, end):
-            payload = self._signed_get(
-                "/sapi/v1/convert/tradeFlow",
-                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "limit": 1000},
+            rows = paginate_numbered(
+                lambda page: self._signed_get(
+                    "/sapi/v1/convert/tradeFlow",
+                    {
+                        "startTime": _to_millis(window.start),
+                        "endTime": _to_millis(window.end),
+                        "limit": 1000,
+                        "current": page,
+                    },
+                ),
+                rows_key="list",
+                page_size=1000,
             )
-            rows = payload.get("list", []) if isinstance(payload, dict) else []
             for row in rows:
                 records.extend(normalize_convert_trade(row))
         return records
@@ -103,11 +112,19 @@ class BinanceClient(ExchangeClient):
     def sync_asset_rewards(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         for window in split_into_daily_windows(start, end):
-            payload = self._signed_get(
-                "/sapi/v1/asset/assetDividend",
-                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "limit": 500},
+            rows = paginate_numbered(
+                lambda page: self._signed_get(
+                    "/sapi/v1/asset/assetDividend",
+                    {
+                        "startTime": _to_millis(window.start),
+                        "endTime": _to_millis(window.end),
+                        "limit": 500,
+                        "current": page,
+                    },
+                ),
+                rows_key="rows",
+                page_size=500,
             )
-            rows = payload.get("rows", []) if isinstance(payload, dict) else []
             for row in rows:
                 records.append(normalize_reward(row, product="asset_dividend", id_prefix="assetDividend"))
         return records
@@ -120,16 +137,19 @@ class BinanceClient(ExchangeClient):
         ]
         for path, product in endpoints:
             for window in split_into_daily_windows(start, end):
-                payload = self._signed_get(
-                    path,
-                    {
-                        "startTime": _to_millis(window.start),
-                        "endTime": _to_millis(window.end),
-                        "current": 1,
-                        "size": 100,
-                    },
+                rows = paginate_numbered(
+                    lambda page: self._signed_get(
+                        path,
+                        {
+                            "startTime": _to_millis(window.start),
+                            "endTime": _to_millis(window.end),
+                            "current": page,
+                            "size": 100,
+                        },
+                    ),
+                    rows_key="rows",
+                    page_size=100,
                 )
-                rows = payload.get("rows", []) if isinstance(payload, dict) else []
                 for row in rows:
                     records.append(normalize_reward(row, product=product, id_prefix=product))
         return records
@@ -141,17 +161,15 @@ class BinanceClient(ExchangeClient):
                 "/sapi/v1/capital/deposit/hisrec",
                 {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
             )
-            if isinstance(deposits, list):
-                for row in deposits:
-                    records.append(normalize_transfer(row, "deposit", "deposit", True))
+            for row in extract_rows(deposits):
+                records.append(normalize_transfer(row, "deposit", "deposit", True))
 
             withdrawals = self._signed_get(
                 "/sapi/v1/capital/withdraw/history",
                 {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
             )
-            if isinstance(withdrawals, list):
-                for row in withdrawals:
-                    records.append(normalize_transfer(row, "withdrawal", "withdrawal", False))
+            for row in extract_rows(withdrawals):
+                records.append(normalize_transfer(row, "withdrawal", "withdrawal", False))
         return records
 
     def _signed_get(self, path: str, params: dict[str, object] | None = None) -> dict | list:
