@@ -14,7 +14,7 @@ class AuditTrailService:
             lot_links=[
                 AuditLotLink(
                     lot_id=match.lot_id,
-                    source_transaction_id=match.lot_id,
+                    source_transaction_id=match.source_transaction_id or match.lot_id,
                     acquired_at=match.acquired_at,
                     quantity=match.quantity,
                     cost_basis_eur=match.cost_basis_eur,
