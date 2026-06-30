@@ -38,9 +38,7 @@ def _tx(**kwargs) -> NormalizedTransaction:
     return NormalizedTransaction(**defaults)
 
 
-def test_end_to_end_report_generation_with_manual_prices(tmp_path, monkeypatch) -> None:
-    _prepare_db(tmp_path, monkeypatch)
-
+def _seed_basic_buy_sell() -> None:
     buy_time = datetime(2024, 1, 1, tzinfo=UTC)
     sell_time = datetime(2025, 1, 1, tzinfo=UTC)
     save_manual_price(
@@ -89,6 +87,11 @@ def test_end_to_end_report_generation_with_manual_prices(tmp_path, monkeypatch) 
         )
     )
 
+
+def test_end_to_end_report_generation_with_manual_prices(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
+    _seed_basic_buy_sell()
+
     validation = ValidationService().validate()
     assert validation.can_create_report
 
@@ -112,3 +115,18 @@ def test_end_to_end_report_generation_with_manual_prices(tmp_path, monkeypatch) 
     assert "Tax Summary" in workbook.sheetnames
     assert "Disposals" in workbook.sheetnames
     assert workbook["Disposals"][2][1].value == "BTC"
+
+
+def test_report_date_range_filters_disposals(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
+    _seed_basic_buy_sell()
+
+    result = ReportGenerationService().generate_tax_report(
+        output_dir=tmp_path / "filtered_report",
+        report_start=datetime(2026, 1, 1),
+        report_end=datetime(2026, 12, 31, 23, 59, 59),
+    )
+
+    assert result.disposals == 0
+    csv_content = result.summary_csv.read_text(encoding="utf-8")
+    assert "sell_btc_1" not in csv_content
