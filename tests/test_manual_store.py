@@ -5,6 +5,7 @@ from crypto_tax_tool.database.manual_store import (
     count_manual_change_log,
     count_manual_entries,
     get_manual_price,
+    load_manual_lots,
     save_manual_lot,
     save_manual_price,
 )
@@ -46,7 +47,7 @@ def test_manual_price_entry_overrides_provider(tmp_path, monkeypatch) -> None:
     assert count_manual_change_log() == 1
 
 
-def test_manual_lot_entry_is_audited(tmp_path, monkeypatch) -> None:
+def test_manual_lot_entry_is_audited_and_loadable(tmp_path, monkeypatch) -> None:
     _prepare_db(tmp_path, monkeypatch)
     entry = ManualLotEntry(
         asset="BTC",
@@ -60,3 +61,10 @@ def test_manual_lot_entry_is_audited(tmp_path, monkeypatch) -> None:
     assert save_manual_lot(entry) is True
     assert count_manual_entries() == 1
     assert count_manual_change_log() == 1
+
+    lots = load_manual_lots()
+    assert len(lots) == 1
+    assert lots[0].asset == "BTC"
+    assert lots[0].quantity == Decimal("0.5")
+    assert lots[0].cost_basis_eur == Decimal("15000")
+    assert lots[0].source_transaction_id == "Kraken CSV 2021"
