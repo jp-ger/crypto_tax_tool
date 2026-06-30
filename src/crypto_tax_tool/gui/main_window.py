@@ -51,7 +51,7 @@ class MainWindow(QMainWindow):
         self.sync_button = QPushButton("Start Binance sync")
         self.sync_button.clicked.connect(self._run_sync)
 
-        self.report_button = QPushButton("Create tax report")
+        self.report_button = QPushButton("Create tax report for selected date range")
         self.report_button.clicked.connect(self._create_tax_report)
 
         self.update_button = QPushButton("Check for updates")
@@ -100,9 +100,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Crypto Tax Tool"))
         layout.addWidget(self.status_label)
         layout.addWidget(self.count_label)
-        layout.addWidget(QLabel("Sync start date"))
+        layout.addWidget(QLabel("Sync / report start date"))
         layout.addWidget(self.start_date)
-        layout.addWidget(QLabel("Sync end date"))
+        layout.addWidget(QLabel("Sync / report end date"))
         layout.addWidget(self.end_date)
         layout.addWidget(self.test_button)
         layout.addWidget(self.sync_button)
@@ -149,6 +149,11 @@ class MainWindow(QMainWindow):
     def _append_log(self, message: str) -> None:
         self.log_box.append(message)
 
+    def _selected_start_end(self) -> tuple[datetime, datetime]:
+        start = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
+        end = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
+        return start, end
+
     def _test_binance_connection(self) -> None:
         try:
             BinanceClient().test_connection()
@@ -176,10 +181,14 @@ class MainWindow(QMainWindow):
             self.update_button.setEnabled(True)
 
     def _create_tax_report(self) -> None:
+        report_start, report_end = self._selected_start_end()
         self.status_label.setText("Creating tax report.")
         self.report_button.setEnabled(False)
         try:
-            result = ReportGenerationService().generate_tax_report()
+            result = ReportGenerationService().generate_tax_report(
+                report_start=report_start,
+                report_end=report_end,
+            )
         except ReportValidationError as exc:
             self.status_label.setText("Report validation failed.")
             self._append_log("Report validation failed:")
@@ -191,8 +200,9 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Report created.")
             self._append_log(
-                f"Report created: {result.output_dir} | transactions: {result.transactions}, "
-                f"disposals: {result.disposals}, open lots: {result.open_lots}"
+                f"Report created for {report_start.date()} to {report_end.date()}: {result.output_dir} | "
+                f"transactions: {result.transactions}, disposals: {result.disposals}, "
+                f"open lots: {result.open_lots}, manual lots: {result.manual_lots}"
             )
             if result.backup_path:
                 self._append_log(f"Backup before report: {result.backup_path}")
@@ -239,8 +249,7 @@ class MainWindow(QMainWindow):
             self._refresh_count()
 
     def _run_sync(self) -> None:
-        start = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
-        end = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
+        start, end = self._selected_start_end()
         self.status_label.setText("Sync running in background.")
         self._append_log(f"Starting sync from {start.isoformat()} to {end.isoformat()}")
         self.sync_button.setEnabled(False)
