@@ -24,9 +24,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist ".venv" (
+if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment...
-    python -m venv .venv
+    python -m venv .venv --clear
     if errorlevel 1 (
         echo ERROR: Could not create virtual environment.
         pause
@@ -41,12 +41,28 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Upgrading pip...
-python -m pip install --upgrade pip
+echo Checking pip inside virtual environment...
+python -m pip --version >nul 2>nul
+if errorlevel 1 (
+    echo pip is broken in .venv. Recreating virtual environment...
+    deactivate >nul 2>nul
+    rmdir /s /q .venv
+    python -m venv .venv --clear
+    if errorlevel 1 goto :error
+    call .venv\Scripts\activate.bat
+    if errorlevel 1 goto :error
+    python -m ensurepip --upgrade
+    if errorlevel 1 goto :error
+)
+
+echo Upgrading pip tooling...
+python -m ensurepip --upgrade
+if errorlevel 1 goto :error
+python -m pip install --upgrade --force-reinstall pip setuptools wheel
 if errorlevel 1 goto :error
 
 echo Installing application, dev and build dependencies...
-python -m pip install -e ".[dev,build]"
+python -m pip install --no-cache-dir -e ".[dev,build]"
 if errorlevel 1 goto :error
 
 echo.
