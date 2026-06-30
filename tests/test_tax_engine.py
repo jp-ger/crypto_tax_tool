@@ -21,7 +21,7 @@ def _tx(**kwargs) -> NormalizedTransaction:
     return NormalizedTransaction(**defaults)
 
 
-def test_tax_engine_creates_disposal_from_fifo_lot(tmp_path, monkeypatch) -> None:
+def _engine(tmp_path, monkeypatch) -> TaxEngine:
     monkeypatch.setenv("CRYPTO_TAX_DB_PATH", str(tmp_path / "test.sqlite3"))
 
     from crypto_tax_tool.database.sqlite_store import initialize_sqlite
@@ -31,9 +31,21 @@ def test_tax_engine_creates_disposal_from_fifo_lot(tmp_path, monkeypatch) -> Non
     initialize_sqlite()
 
     price_service = HistoricalPriceService(
-        providers=[StaticPriceProvider({("BTC", "EUR"): Decimal("50000"), ("USDC", "EUR"): Decimal("1")})]
+        providers=[
+            StaticPriceProvider(
+                {
+                    ("BTC", "EUR"): Decimal("50000"),
+                    ("USDC", "EUR"): Decimal("1"),
+                    ("BNB", "EUR"): Decimal("300"),
+                }
+            )
+        ]
     )
-    engine = TaxEngine(price_service)
+    return TaxEngine(price_service)
+
+
+def test_tax_engine_creates_disposal_from_fifo_lot(tmp_path, monkeypatch) -> None:
+    engine = _engine(tmp_path, monkeypatch)
 
     buy = _tx(
         source_id="buy1",
@@ -60,3 +72,54 @@ def test_tax_engine_creates_disposal_from_fifo_lot(tmp_path, monkeypatch) -> Non
     assert result.disposals[0].cost_basis_eur == Decimal("3000")
     assert result.disposals[0].proceeds_eur == Decimal("5000")
     assert result.disposals[0].gain_eur == Decimal("2000")
+
+
+def test_buy_fee_increases_cost_basis(tmp_path, monkeypatch) -> None:
+    engine = _engine(tmp_path, monkeypatch)
+
+    buy = _tx(
+        source_id="buy_fee",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        asset="BTC",
+        quantity=Decimal("0.1"),
+        quote_asset="USDC",
+        quote_quantity=Decimal("3000"),
+        fee_asset="USDC",
+        fee_quantity=Decimal("5"),
+        side=TradeSide.BUY,
+    )
+
+    result = engine.calculate([buy])
+
+    assert result.open_lots[0].cost_basis_eur == Decimal("3005")
+
+
+def test_sell_fee_reduces_proceeds(tmp_path, monkeypatch) -> None:
+    engine = _engine(tmp_path, monkeypatch)
+
+    buy = _tx(
+        source_id="buy1",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        asset="BTC",
+        quantity=Decimal("0.1"),
+        quote_asset="USDC",
+        quote_quantity=Decimal("3000"),
+        side=TradeSide.BUY,
+    )
+    sell = _tx(
+        source_id="sell_fee",
+        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+        asset="USDC",
+        quantity=Decimal("5000"),
+        quote_asset="BTC",
+        quote_quantity=Decimal("0.1"),
+        fee_asset="USDC",
+        fee_quantity=Decimal("10"),
+        side=TradeSide.SELL,
+    )
+
+    result = engine.calculate([buy, sell])
+
+    assert result.disposals[0].fee_eur == Decimal("10")
+    assert result.disposals[0].proceeds_eur == Decimal("4990")
+    assert result.disposals[0].gain_eur == Decimal("1990")
