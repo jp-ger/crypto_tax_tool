@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from crypto_tax_tool.database.loaders import load_transactions
+from crypto_tax_tool.database.manual_store import load_manual_lots
 from crypto_tax_tool.reports.audit_report import AuditCsvExporter
 from crypto_tax_tool.reports.csv_report import CsvTaxReportExporter
 from crypto_tax_tool.reports.excel_report import ExcelTaxReportExporter
@@ -34,6 +35,7 @@ class ReportGenerationResult:
     open_lots: int
     validation_report: ValidationReport
     backup_path: Path | None
+    manual_lots: int
 
 
 class ReportGenerationService:
@@ -44,13 +46,14 @@ class ReportGenerationService:
 
         backup = BackupService().create_backup("before_report")
         transactions = load_transactions()
+        manual_lots = load_manual_lots()
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         if output_dir is None:
             output_dir = get_settings().data_dir / "reports" / f"tax_report_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         price_service = HistoricalPriceService(providers=[BinanceHistoricalPriceProvider()])
-        calculation = TaxEngine(price_service).calculate(transactions)
+        calculation = TaxEngine(price_service, initial_lots=manual_lots).calculate(transactions)
         summary = TaxSummaryService().build_summary(calculation)
         audit_records = AuditTrailService().build_report_audit(calculation)
 
@@ -70,4 +73,5 @@ class ReportGenerationService:
             open_lots=len(calculation.open_lots),
             validation_report=validation_report,
             backup_path=backup.path,
+            manual_lots=len(manual_lots),
         )
