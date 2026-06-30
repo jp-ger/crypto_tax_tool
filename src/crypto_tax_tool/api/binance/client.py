@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from crypto_tax_tool.api.binance.http import with_retries
 from crypto_tax_tool.api.binance.normalizers import (
     normalize_convert_trade,
     normalize_reward,
@@ -39,13 +40,14 @@ class BinanceClient(ExchangeClient):
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
 
     def test_connection(self) -> bool:
-        response = self.session.get(f"{self.base_url}/api/v3/ping", timeout=15)
+        response = with_retries(lambda: self.session.get(f"{self.base_url}/api/v3/ping", timeout=15))
         response.raise_for_status()
         return True
 
     def get_exchange_symbols(self) -> list[BinanceSymbol]:
-        response = self.session.get(f"{self.base_url}/api/v3/exchangeInfo", timeout=30)
-        response.raise_for_status()
+        response = with_retries(
+            lambda: self.session.get(f"{self.base_url}/api/v3/exchangeInfo", timeout=30)
+        )
         return parse_exchange_info(response.json())
 
     def sync_transactions(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
@@ -160,6 +162,5 @@ class BinanceClient(ExchangeClient):
         query = urlencode(payload)
         signature = hmac.new(self.api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
         url = f"{self.base_url}{path}?{query}&signature={signature}"
-        response = self.session.get(url, timeout=30)
-        response.raise_for_status()
+        response = with_retries(lambda: self.session.get(url, timeout=30))
         return response.json()
