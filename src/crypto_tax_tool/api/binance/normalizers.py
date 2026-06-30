@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from crypto_tax_tool.models.balances import AssetBalance, BalanceSnapshot
 from crypto_tax_tool.models.enums import TaxCategory, TradeSide, TransactionKind, TransactionSource
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 
@@ -122,3 +123,14 @@ def normalize_transfer(payload: dict, product: str, id_prefix: str, is_deposit: 
         raw_type=id_prefix,
         metadata=dict(payload),
     )
+
+
+def normalize_account_balances(payload: dict) -> BalanceSnapshot:
+    balances: list[AssetBalance] = []
+    for row in payload.get("balances", []):
+        free = _decimal(row.get("free"))
+        locked = _decimal(row.get("locked"))
+        if free == 0 and locked == 0:
+            continue
+        balances.append(AssetBalance(asset=row["asset"], free=free, locked=locked))
+    return BalanceSnapshot(source=TransactionSource.BINANCE, balances=balances)
