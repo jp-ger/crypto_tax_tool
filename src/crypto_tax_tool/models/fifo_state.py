@@ -23,6 +23,7 @@ class LotUsage(BaseModel):
     quantity: Decimal
     cost_basis_eur: Decimal
     value_eur: Decimal
+    source_transaction_id: str | None = None
 
     @property
     def result_eur(self) -> Decimal:
