@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import (
     QDateEdit,
     QLabel,
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from crypto_tax_tool.api.binance.client import BinanceClient
 from crypto_tax_tool.database.sqlite_store import count_balance_rows, count_transactions
-from crypto_tax_tool.services.sync_service import SyncService
+from crypto_tax_tool.gui.sync_worker import SyncWorker
 
 
 class MainWindow(QMainWindow):
@@ -20,6 +21,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Crypto Tax Tool")
         self.resize(900, 650)
+        self.sync_thread: QThread | None = None
+        self.sync_worker: SyncWorker | None = None
 
         self.status_label = QLabel("Ready. Use read-only API credentials.")
         self.count_label = QLabel(self._local_count_text())
@@ -86,20 +89,35 @@ class MainWindow(QMainWindow):
     def _run_sync(self) -> None:
         start = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
         end = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
-        self.status_label.setText("Sync running. This can take several minutes.")
+        self.status_label.setText("Sync running in background.")
         self._append_log(f"Starting sync from {start.isoformat()} to {end.isoformat()}")
         self.sync_button.setEnabled(False)
-        try:
-            result = SyncService(BinanceClient()).sync(start=start, end=end)
-        except Exception as exc:  # noqa: BLE001
-            self.status_label.setText(f"Sync failed: {exc}")
-            self._append_log(f"Sync failed: {exc}")
-        else:
-            self.status_label.setText("Sync completed.")
-            self._append_log(
-                f"Sync completed. Loaded: {result.loaded}, inserted: {result.inserted}, "
-                f"balance rows: {result.balance_rows}"
-            )
-            self._refresh_count()
-        finally:
-            self.sync_button.setEnabled(True)
+
+        self.sync_thread = QThread()
+        self.sync_worker = SyncWorker(start=start, end=end)
+        self.sync_worker.moveToThread(self.sync_thread)
+        self.sync_thread.started.connect(self.sync_worker.run)
+        self.sync_worker.log.connect(self._append_log)
+        self.sync_worker.finished.connect(self._sync_finished)
+        self.sync_worker.failed.connect(self._sync_failed)
+        self.sync_worker.finished.connect(self.sync_thread.quit)
+        self.sync_worker.failed.connect(self.sync_thread.quit)
+        self.sync_thread.finished.connect(self._sync_thread_finished)
+        self.sync_thread.start()
+
+    def _sync_finished(self, result) -> None:
+        self.status_label.setText("Sync completed.")
+        self._append_log(
+            f"Sync completed. Loaded: {result.loaded}, inserted: {result.inserted}, "
+            f"balance rows: {result.balance_rows}"
+        )
+        self._refresh_count()
+
+    def _sync_failed(self, message: str) -> None:
+        self.status_label.setText(f"Sync failed: {message}")
+        self._append_log(f"Sync failed: {message}")
+
+    def _sync_thread_finished(self) -> None:
+        self.sync_button.setEnabled(True)
+        self.sync_worker = None
+        self.sync_thread = None
