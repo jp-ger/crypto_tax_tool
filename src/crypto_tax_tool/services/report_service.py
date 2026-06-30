@@ -90,14 +90,25 @@ class ReportGenerationService:
     ) -> TaxCalculationResult:
         if report_start is None and report_end is None:
             return calculation
+        report_start = _as_utc(report_start)
+        report_end = _as_utc(report_end)
         disposals = []
         for disposal in calculation.disposals:
-            if disposal.disposed_at is None:
+            disposed_at = _as_utc(disposal.disposed_at)
+            if disposed_at is None:
                 disposals.append(disposal)
                 continue
-            if report_start is not None and disposal.disposed_at < report_start:
+            if report_start is not None and disposed_at < report_start:
                 continue
-            if report_end is not None and disposal.disposed_at > report_end:
+            if report_end is not None and disposed_at > report_end:
                 continue
             disposals.append(disposal)
         return TaxCalculationResult(disposals=disposals, open_lots=calculation.open_lots)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
