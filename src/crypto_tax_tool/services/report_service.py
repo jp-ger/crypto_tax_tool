@@ -11,7 +11,15 @@ from crypto_tax_tool.services.binance_price_provider import BinanceHistoricalPri
 from crypto_tax_tool.services.pricing import HistoricalPriceService
 from crypto_tax_tool.services.tax_engine import TaxEngine
 from crypto_tax_tool.services.tax_summary import TaxSummaryService
+from crypto_tax_tool.services.validation_service import ValidationReport, ValidationService
 from crypto_tax_tool.settings import get_settings
+
+
+class ReportValidationError(RuntimeError):
+    def __init__(self, validation_report: ValidationReport) -> None:
+        self.validation_report = validation_report
+        messages = "; ".join(issue.message for issue in validation_report.errors)
+        super().__init__(messages or "Validation failed.")
 
 
 @dataclass(frozen=True)
@@ -23,10 +31,15 @@ class ReportGenerationResult:
     transactions: int
     disposals: int
     open_lots: int
+    validation_report: ValidationReport
 
 
 class ReportGenerationService:
     def generate_tax_report(self, output_dir: Path | None = None) -> ReportGenerationResult:
+        validation_report = ValidationService().validate()
+        if not validation_report.can_create_report:
+            raise ReportValidationError(validation_report)
+
         transactions = load_transactions()
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         if output_dir is None:
@@ -52,4 +65,5 @@ class ReportGenerationService:
             transactions=len(transactions),
             disposals=len(calculation.disposals),
             open_lots=len(calculation.open_lots),
+            validation_report=validation_report,
         )
