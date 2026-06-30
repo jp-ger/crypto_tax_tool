@@ -1,12 +1,19 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from crypto_tax_tool.database.sqlite_store import count_transactions, initialize_sqlite, save_transactions
+from crypto_tax_tool.database.sqlite_store import (
+    count_balance_rows,
+    count_transactions,
+    initialize_sqlite,
+    save_balance_snapshot,
+    save_transactions,
+)
+from crypto_tax_tool.models.balances import AssetBalance, BalanceSnapshot
 from crypto_tax_tool.models.enums import TaxCategory, TradeSide, TransactionKind, TransactionSource
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 
 
-def test_save_transactions(tmp_path, monkeypatch) -> None:
+def _prepare_db(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "test.sqlite3"
     monkeypatch.setenv("CRYPTO_TAX_DB_PATH", str(db_path))
 
@@ -14,6 +21,10 @@ def test_save_transactions(tmp_path, monkeypatch) -> None:
 
     get_settings.cache_clear()
     initialize_sqlite()
+
+
+def test_save_transactions(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
 
     tx = NormalizedTransaction(
         source=TransactionSource.BINANCE,
@@ -35,3 +46,18 @@ def test_save_transactions(tmp_path, monkeypatch) -> None:
     assert save_transactions([tx]) == 1
     assert save_transactions([tx]) == 0
     assert count_transactions() == 1
+
+
+def test_save_balance_snapshot(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
+
+    snapshot = BalanceSnapshot(
+        source=TransactionSource.BINANCE,
+        balances=[
+            AssetBalance(asset="BTC", free=Decimal("0.1"), locked=Decimal("0")),
+            AssetBalance(asset="USDC", free=Decimal("100"), locked=Decimal("5")),
+        ],
+    )
+
+    assert save_balance_snapshot(snapshot) == 2
+    assert count_balance_rows() == 2
