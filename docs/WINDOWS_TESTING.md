@@ -47,6 +47,15 @@ Use a read-only Binance API key.
 
 Start with a small period, for example one week, before syncing the full history.
 
+For a real tax report, sync the full account history first so FIFO has all acquisition lots. Then set the selected date range to the tax period before clicking `Create tax report for selected date range`.
+
+Example for German tax year 2025:
+
+1. Sync full Binance history up to `2025-12-31`.
+2. Set start date to `2025-01-01`.
+3. Set end date to `2025-12-31`.
+4. Create the tax report.
+
 ## 6. If the build fails
 
 Copy the last 30-50 lines from the command window and use them for troubleshooting.
