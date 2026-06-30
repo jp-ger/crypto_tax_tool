@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
+from crypto_tax_tool.database.manual_store import get_manual_price
 from crypto_tax_tool.database.sqlite_store import get_cached_price, save_price
 from crypto_tax_tool.models.prices import HistoricalPrice
 
@@ -41,6 +42,10 @@ class HistoricalPriceService:
         self.providers = providers or []
 
     def get_price(self, asset: str, quote_asset: str, timestamp: datetime) -> HistoricalPrice:
+        manual = get_manual_price(asset, quote_asset, timestamp)
+        if manual:
+            return manual
+
         cached = get_cached_price(asset, quote_asset, timestamp)
         if cached:
             return cached
