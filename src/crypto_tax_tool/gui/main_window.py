@@ -1,9 +1,13 @@
 from datetime import datetime
+from decimal import Decimal
 
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import (
     QDateEdit,
+    QDoubleSpinBox,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QTextEdit,
@@ -12,15 +16,17 @@ from PySide6.QtWidgets import (
 )
 
 from crypto_tax_tool.api.binance.client import BinanceClient
+from crypto_tax_tool.database.manual_store import count_manual_entries, save_manual_lot, save_manual_price
 from crypto_tax_tool.database.sqlite_store import count_balance_rows, count_transactions
 from crypto_tax_tool.gui.sync_worker import SyncWorker
+from crypto_tax_tool.models.manual_entries import ManualLotEntry, ManualPriceEntry
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Crypto Tax Tool")
-        self.resize(900, 650)
+        self.resize(950, 760)
         self.sync_thread: QThread | None = None
         self.sync_worker: SyncWorker | None = None
 
@@ -46,6 +52,39 @@ class MainWindow(QMainWindow):
         self.refresh_button = QPushButton("Refresh local counts")
         self.refresh_button.clicked.connect(self._refresh_count)
 
+        self.manual_price_asset = QLineEdit()
+        self.manual_price_asset.setPlaceholderText("Asset, e.g. BTC")
+        self.manual_price_date = QDateEdit()
+        self.manual_price_date.setCalendarPopup(True)
+        self.manual_price_date.setDisplayFormat("yyyy-MM-dd")
+        self.manual_price_date.setDate(self.manual_price_date.date().currentDate())
+        self.manual_price_value = QDoubleSpinBox()
+        self.manual_price_value.setMaximum(1_000_000_000)
+        self.manual_price_value.setDecimals(8)
+        self.manual_price_reason = QLineEdit()
+        self.manual_price_reason.setPlaceholderText("Reason/source")
+        self.manual_price_button = QPushButton("Save manual EUR price")
+        self.manual_price_button.clicked.connect(self._save_manual_price)
+
+        self.manual_lot_asset = QLineEdit()
+        self.manual_lot_asset.setPlaceholderText("Asset, e.g. BTC")
+        self.manual_lot_date = QDateEdit()
+        self.manual_lot_date.setCalendarPopup(True)
+        self.manual_lot_date.setDisplayFormat("yyyy-MM-dd")
+        self.manual_lot_date.setDate(self.manual_lot_date.date().currentDate())
+        self.manual_lot_quantity = QDoubleSpinBox()
+        self.manual_lot_quantity.setMaximum(1_000_000_000)
+        self.manual_lot_quantity.setDecimals(12)
+        self.manual_lot_cost = QDoubleSpinBox()
+        self.manual_lot_cost.setMaximum(1_000_000_000)
+        self.manual_lot_cost.setDecimals(2)
+        self.manual_lot_reference = QLineEdit()
+        self.manual_lot_reference.setPlaceholderText("Source/reference")
+        self.manual_lot_reason = QLineEdit()
+        self.manual_lot_reason.setPlaceholderText("Reason")
+        self.manual_lot_button = QPushButton("Save manual FIFO lot")
+        self.manual_lot_button.clicked.connect(self._save_manual_lot)
+
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
 
@@ -60,6 +99,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.test_button)
         layout.addWidget(self.sync_button)
         layout.addWidget(self.refresh_button)
+
+        layout.addWidget(QLabel("Manual EUR price"))
+        price_row = QHBoxLayout()
+        price_row.addWidget(self.manual_price_asset)
+        price_row.addWidget(self.manual_price_date)
+        price_row.addWidget(self.manual_price_value)
+        price_row.addWidget(self.manual_price_reason)
+        price_row.addWidget(self.manual_price_button)
+        layout.addLayout(price_row)
+
+        layout.addWidget(QLabel("Manual FIFO lot / external acquisition"))
+        lot_row = QHBoxLayout()
+        lot_row.addWidget(self.manual_lot_asset)
+        lot_row.addWidget(self.manual_lot_date)
+        lot_row.addWidget(self.manual_lot_quantity)
+        lot_row.addWidget(self.manual_lot_cost)
+        lot_row.addWidget(self.manual_lot_reference)
+        lot_row.addWidget(self.manual_lot_reason)
+        lot_row.addWidget(self.manual_lot_button)
+        layout.addLayout(lot_row)
+
         layout.addWidget(QLabel("Status log"))
         layout.addWidget(self.log_box)
 
@@ -68,7 +128,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
     def _local_count_text(self) -> str:
-        return f"Local transactions: {count_transactions()} | Balance rows: {count_balance_rows()}"
+        return (
+            f"Local transactions: {count_transactions()} | Balance rows: {count_balance_rows()} | "
+            f"Manual entries: {count_manual_entries()}"
+        )
 
     def _refresh_count(self) -> None:
         self.count_label.setText(self._local_count_text())
@@ -85,6 +148,43 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Binance API is reachable.")
             self._append_log("Binance API is reachable.")
+
+    def _save_manual_price(self) -> None:
+        try:
+            timestamp = datetime.combine(self.manual_price_date.date().toPython(), datetime.min.time())
+            entry = ManualPriceEntry(
+                asset=self.manual_price_asset.text().strip().upper(),
+                quote_asset="EUR",
+                timestamp=timestamp,
+                price=Decimal(str(self.manual_price_value.value())),
+                reason=self.manual_price_reason.text().strip() or "Manual price entry",
+            )
+            save_manual_price(entry)
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"Manual price failed: {exc}")
+        else:
+            self._append_log(f"Manual price saved: {entry.asset}/EUR {entry.price} at {entry.timestamp.date()}")
+            self._refresh_count()
+
+    def _save_manual_lot(self) -> None:
+        try:
+            acquired_at = datetime.combine(self.manual_lot_date.date().toPython(), datetime.min.time())
+            entry = ManualLotEntry(
+                asset=self.manual_lot_asset.text().strip().upper(),
+                acquired_at=acquired_at,
+                quantity=Decimal(str(self.manual_lot_quantity.value())),
+                cost_basis_eur=Decimal(str(self.manual_lot_cost.value())),
+                reason=self.manual_lot_reason.text().strip() or "Manual external acquisition",
+                source_reference=self.manual_lot_reference.text().strip() or None,
+            )
+            save_manual_lot(entry)
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"Manual lot failed: {exc}")
+        else:
+            self._append_log(
+                f"Manual lot saved: {entry.quantity} {entry.asset}, cost basis EUR {entry.cost_basis_eur}"
+            )
+            self._refresh_count()
 
     def _run_sync(self) -> None:
         start = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
