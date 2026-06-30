@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from crypto_tax_tool.models.balances import BalanceSnapshot
+from crypto_tax_tool.models.prices import HistoricalPrice
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.settings import get_settings
 
@@ -58,6 +59,20 @@ CREATE TABLE IF NOT EXISTS balance_rows (
 );
 
 CREATE INDEX IF NOT EXISTS idx_balance_rows_asset ON balance_rows(asset);
+
+CREATE TABLE IF NOT EXISTS historical_prices (
+    id TEXT PRIMARY KEY,
+    asset TEXT NOT NULL,
+    quote_asset TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    price TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    pair TEXT,
+    UNIQUE(asset, quote_asset, timestamp, provider)
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_prices_lookup
+ON historical_prices(asset, quote_asset, timestamp);
 """
 
 
@@ -144,6 +159,53 @@ def save_balance_snapshot(snapshot: BalanceSnapshot) -> int:
     return len(snapshot.balances)
 
 
+def save_price(price: HistoricalPrice) -> bool:
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO historical_prices (
+                id, asset, quote_asset, timestamp, price, provider, pair
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                price.id,
+                price.asset,
+                price.quote_asset,
+                price.timestamp.isoformat(),
+                str(price.price),
+                price.provider,
+                price.pair,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
+
+def get_cached_price(asset: str, quote_asset: str, timestamp: datetime) -> HistoricalPrice | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, asset, quote_asset, timestamp, price, provider, pair
+            FROM historical_prices
+            WHERE asset = ? AND quote_asset = ? AND timestamp = ?
+            ORDER BY provider
+            LIMIT 1
+            """,
+            (asset, quote_asset, timestamp.isoformat()),
+        ).fetchone()
+    if row is None:
+        return None
+    return HistoricalPrice(
+        id=row["id"],
+        asset=row["asset"],
+        quote_asset=row["quote_asset"],
+        timestamp=datetime.fromisoformat(row["timestamp"]),
+        price=Decimal(row["price"]),
+        provider=row["provider"],
+        pair=row["pair"],
+    )
+
+
 def set_sync_state(key: str, value: str) -> None:
     now = datetime.now(UTC).isoformat()
     with connect() as conn:
@@ -175,4 +237,10 @@ def count_transactions() -> int:
 def count_balance_rows() -> int:
     with connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM balance_rows").fetchone()
+        return int(row["n"])
+
+
+def count_prices() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM historical_prices").fetchone()
         return int(row["n"])
