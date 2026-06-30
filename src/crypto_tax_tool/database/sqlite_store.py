@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from crypto_tax_tool.models.balances import BalanceSnapshot
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.settings import get_settings
 
@@ -39,6 +40,24 @@ CREATE TABLE IF NOT EXISTS sync_state (
     sync_value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS balance_snapshots (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS balance_rows (
+    snapshot_id TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    free TEXT NOT NULL,
+    locked TEXT NOT NULL,
+    total TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, asset),
+    FOREIGN KEY (snapshot_id) REFERENCES balance_snapshots(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_balance_rows_asset ON balance_rows(asset);
 """
 
 
@@ -103,6 +122,28 @@ def save_transactions(rows: list[NormalizedTransaction]) -> int:
     return inserted
 
 
+def save_balance_snapshot(snapshot: BalanceSnapshot) -> int:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO balance_snapshots (id, source, timestamp)
+            VALUES (?, ?, ?)
+            """,
+            (snapshot.id, snapshot.source.value, snapshot.timestamp.isoformat()),
+        )
+        conn.execute("DELETE FROM balance_rows WHERE snapshot_id = ?", (snapshot.id,))
+        for row in snapshot.balances:
+            conn.execute(
+                """
+                INSERT INTO balance_rows (snapshot_id, asset, free, locked, total)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (snapshot.id, row.asset, str(row.free), str(row.locked), str(row.total)),
+            )
+        conn.commit()
+    return len(snapshot.balances)
+
+
 def set_sync_state(key: str, value: str) -> None:
     now = datetime.now(UTC).isoformat()
     with connect() as conn:
@@ -128,4 +169,10 @@ def get_sync_state(key: str) -> str | None:
 def count_transactions() -> int:
     with connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM transactions").fetchone()
+        return int(row["n"])
+
+
+def count_balance_rows() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM balance_rows").fetchone()
         return int(row["n"])
