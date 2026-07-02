@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from urllib.parse import urlencode
 
@@ -34,13 +35,18 @@ class BinanceClient(ExchangeClient):
 
     base_url = "https://api.binance.com"
 
-    def __init__(self) -> None:
+    def __init__(self, progress_callback: Callable[[str], None] | None = None) -> None:
         settings = get_settings()
         self.api_key = settings.binance_api_key
         self.api_secret = settings.binance_api_secret.encode("utf-8")
+        self.progress_callback = progress_callback
         self.session = requests.Session()
         if self.api_key:
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
+
+    def _log(self, message: str) -> None:
+        if self.progress_callback:
+            self.progress_callback(message)
 
     def test_connection(self) -> bool:
         response = with_retries(lambda: self.session.get(f"{self.base_url}/api/v3/ping", timeout=15))
@@ -48,39 +54,72 @@ class BinanceClient(ExchangeClient):
         return True
 
     def get_exchange_symbols(self) -> list[BinanceSymbol]:
+        self._log("Loading Binance exchange symbols...")
         response = with_retries(
             lambda: self.session.get(f"{self.base_url}/api/v3/exchangeInfo", timeout=30)
         )
-        return parse_exchange_info(response.json())
+        symbols = parse_exchange_info(response.json())
+        self._log(f"Loaded {len(symbols)} Binance exchange symbols.")
+        return symbols
 
     def get_account_snapshot(self) -> BalanceSnapshot:
+        self._log("Requesting Binance account snapshot...")
         payload = self._signed_get("/api/v3/account")
         if not isinstance(payload, dict):
             raise ValueError("Unexpected account payload from Binance API.")
         return normalize_account_balances(payload)
 
     def sync_transactions(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        self._log(f"Binance transaction sync range: {start.isoformat()} to {end.isoformat()}")
         records: list[NormalizedTransaction] = []
-        records.extend(self.sync_spot_trades(start, end))
-        records.extend(self.sync_convert_trades(start, end))
-        records.extend(self.sync_asset_rewards(start, end))
-        records.extend(self.sync_simple_earn_rewards(start, end))
-        records.extend(self.sync_transfers(start, end))
+
+        self._log("Syncing spot trades...")
+        spot_records = self.sync_spot_trades(start, end)
+        records.extend(spot_records)
+        self._log(f"Spot trades synced: {len(spot_records)} rows.")
+
+        self._log("Syncing convert trades...")
+        convert_records = self.sync_convert_trades(start, end)
+        records.extend(convert_records)
+        self._log(f"Convert trades synced: {len(convert_records)} rows.")
+
+        self._log("Syncing asset rewards/dividends...")
+        asset_reward_records = self.sync_asset_rewards(start, end)
+        records.extend(asset_reward_records)
+        self._log(f"Asset rewards/dividends synced: {len(asset_reward_records)} rows.")
+
+        self._log("Syncing Simple Earn rewards...")
+        simple_earn_records = self.sync_simple_earn_rewards(start, end)
+        records.extend(simple_earn_records)
+        self._log(f"Simple Earn rewards synced: {len(simple_earn_records)} rows.")
+
+        self._log("Syncing deposits and withdrawals...")
+        transfer_records = self.sync_transfers(start, end)
+        records.extend(transfer_records)
+        self._log(f"Deposits and withdrawals synced: {len(transfer_records)} rows.")
+
+        self._log(f"All Binance transaction loaders completed. Total rows: {len(records)}.")
         return records
 
     def sync_spot_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        for item in self.get_exchange_symbols():
-            if item.status != "TRADING":
-                continue
-            records.extend(self.get_spot_trades(item, start, end))
+        symbols = [item for item in self.get_exchange_symbols() if item.status == "TRADING"]
+        self._log(f"Checking spot trades for {len(symbols)} active trading symbols...")
+        for index, item in enumerate(symbols, start=1):
+            if index == 1 or index % 25 == 0 or index == len(symbols):
+                self._log(f"Spot trade progress: symbol {index}/{len(symbols)} ({item.symbol})")
+            symbol_records = self.get_spot_trades(item, start, end)
+            if symbol_records:
+                self._log(f"Found {len(symbol_records)} spot trade rows for {item.symbol}.")
+            records.extend(symbol_records)
         return records
 
     def get_spot_trades(
         self, symbol: BinanceSymbol, start: datetime, end: datetime
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        for window in split_into_daily_windows(start, end):
+        windows = split_into_daily_windows(start, end)
+        for window_index, window in enumerate(windows, start=1):
             rows = self._signed_get(
                 "/api/v3/myTrades",
                 {
@@ -95,11 +134,19 @@ class BinanceClient(ExchangeClient):
             for row in rows:
                 row["symbol"] = symbol.symbol
                 records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
+            if rows and (window_index == 1 or window_index % 30 == 0 or window_index == len(windows)):
+                self._log(
+                    f"{symbol.symbol}: processed window {window_index}/{len(windows)}, "
+                    f"found {len(rows)} raw trade rows in this window."
+                )
         return records
 
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        for window in split_into_daily_windows(start, end):
+        windows = split_into_daily_windows(start, end)
+        for window_index, window in enumerate(windows, start=1):
+            if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
+                self._log(f"Convert trade progress: window {window_index}/{len(windows)}")
             rows = paginate_numbered(
                 lambda page: self._signed_get(
                     "/sapi/v1/convert/tradeFlow",
@@ -119,7 +166,10 @@ class BinanceClient(ExchangeClient):
 
     def sync_asset_rewards(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        for window in split_into_daily_windows(start, end):
+        windows = split_into_daily_windows(start, end)
+        for window_index, window in enumerate(windows, start=1):
+            if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
+                self._log(f"Asset reward progress: window {window_index}/{len(windows)}")
             rows = paginate_numbered(
                 lambda page: self._signed_get(
                     "/sapi/v1/asset/assetDividend",
@@ -143,8 +193,12 @@ class BinanceClient(ExchangeClient):
             ("/sapi/v1/simple-earn/flexible/history/rewardsRecord", "simple_earn_flexible"),
             ("/sapi/v1/simple-earn/locked/history/rewardsRecord", "simple_earn_locked"),
         ]
+        windows = split_into_daily_windows(start, end)
         for path, product in endpoints:
-            for window in split_into_daily_windows(start, end):
+            self._log(f"Simple Earn endpoint: {product}")
+            for window_index, window in enumerate(windows, start=1):
+                if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
+                    self._log(f"{product} progress: window {window_index}/{len(windows)}")
                 rows = paginate_numbered(
                     lambda page: self._signed_get(
                         path,
@@ -164,7 +218,10 @@ class BinanceClient(ExchangeClient):
 
     def sync_transfers(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        for window in split_into_daily_windows(start, end):
+        windows = split_into_daily_windows(start, end)
+        for window_index, window in enumerate(windows, start=1):
+            if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
+                self._log(f"Transfer progress: window {window_index}/{len(windows)}")
             deposits = self._signed_get(
                 "/sapi/v1/capital/deposit/hisrec",
                 {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
@@ -189,4 +246,5 @@ class BinanceClient(ExchangeClient):
         signature = hmac.new(self.api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
         url = f"{self.base_url}{path}?{query}&signature={signature}"
         response = with_retries(lambda: self.session.get(url, timeout=30))
+        response.raise_for_status()
         return response.json()
