@@ -120,77 +120,61 @@ class BinanceClient(ExchangeClient):
         symbols = [item for item in self.get_exchange_symbols() if item.status == "TRADING"]
         self._log(
             f"Checking spot trades for {len(symbols)} active trading symbols. "
-            "Using one range request per symbol instead of daily windows."
+            "First detecting symbols with account trades, then using daily windows only for those symbols."
         )
+
+        traded_symbols: list[BinanceSymbol] = []
         for index, item in enumerate(symbols, start=1):
-            if index == 1 or index % 10 == 0 or index == len(symbols):
-                self._log(f"Spot trade progress: symbol {index}/{len(symbols)} ({item.symbol})")
+            if index == 1 or index % 50 == 0 or index == len(symbols):
+                self._log(f"Detecting traded symbols: {index}/{len(symbols)} ({item.symbol})")
+            if self._symbol_has_any_trades(item):
+                traded_symbols.append(item)
+                self._log(f"Detected account trade history for {item.symbol}.")
+
+        self._log(f"Detected {len(traded_symbols)} symbols with account spot trades.")
+        for index, item in enumerate(traded_symbols, start=1):
+            self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
             symbol_records = self.get_spot_trades(item, start, end)
-            if symbol_records:
-                self._log(f"Found {len(symbol_records)} spot trade rows for {item.symbol}.")
+            self._log(f"Imported {len(symbol_records)} spot trade rows for {item.symbol}.")
             records.extend(symbol_records)
         return records
+
+    def _symbol_has_any_trades(self, symbol: BinanceSymbol) -> bool:
+        rows = self._signed_get(
+            "/api/v3/myTrades",
+            {
+                "symbol": symbol.symbol,
+                "limit": 1,
+            },
+        )
+        return isinstance(rows, list) and len(rows) > 0
 
     def get_spot_trades(
         self, symbol: BinanceSymbol, start: datetime, end: datetime
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        end_ms = _to_millis(end)
-        start_ms = _to_millis(start)
-
-        rows = self._signed_get(
-            "/api/v3/myTrades",
-            {
-                "symbol": symbol.symbol,
-                "startTime": start_ms,
-                "endTime": end_ms,
-                "limit": 1000,
-            },
-        )
-        if not isinstance(rows, list):
-            return records
-
-        all_rows: list[dict] = [row for row in rows if isinstance(row, dict)]
-
-        # Binance returns at most 1000 rows per call. If a pair has more than 1000 trades,
-        # continue from the last trade id and keep rows inside the requested date range.
-        while len(rows) == 1000 and all_rows:
-            last_id = all_rows[-1].get("id")
-            if last_id is None:
-                self._log(
-                    f"WARNING {symbol.symbol}: received 1000 rows but no trade id for pagination. "
-                    "Only the first 1000 rows can be imported for this symbol."
-                )
-                break
-
-            next_rows = self._signed_get(
+        windows = split_into_daily_windows(start, end)
+        for window_index, window in enumerate(windows, start=1):
+            if window_index == 1 or window_index % 90 == 0 or window_index == len(windows):
+                self._log(f"{symbol.symbol}: daily window {window_index}/{len(windows)}")
+            rows = self._signed_get(
                 "/api/v3/myTrades",
                 {
                     "symbol": symbol.symbol,
-                    "fromId": int(last_id) + 1,
+                    "startTime": _to_millis(window.start),
+                    "endTime": _to_millis(window.end),
                     "limit": 1000,
                 },
             )
-            if not isinstance(next_rows, list) or not next_rows:
-                break
-
-            typed_next_rows = [row for row in next_rows if isinstance(row, dict)]
-            in_range_rows = [
-                row for row in typed_next_rows if start_ms <= _row_time_millis(row) <= end_ms
-            ]
-            all_rows.extend(in_range_rows)
-
-            latest_time = max((_row_time_millis(row) for row in typed_next_rows), default=0)
-            if latest_time > end_ms or len(next_rows) < 1000:
-                break
-            rows = next_rows
-
-        for row in all_rows:
-            row_time = _row_time_millis(row)
-            if row_time and not (start_ms <= row_time <= end_ms):
+            if not isinstance(rows, list):
                 continue
-            row["symbol"] = symbol.symbol
-            records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row["symbol"] = symbol.symbol
+                records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
+            if rows:
+                self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in current window.")
         return records
 
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
