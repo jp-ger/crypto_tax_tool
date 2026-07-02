@@ -6,7 +6,9 @@ from crypto_tax_tool.models.enums import TaxCategory, TradeSide, TransactionKind
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 
 
-def _dt_from_ms(value: int | str) -> datetime:
+def _dt_from_ms(value: int | str | None) -> datetime:
+    if value is None or value == "":
+        raise ValueError("Missing timestamp in Binance payload.")
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
 
 
@@ -85,10 +87,12 @@ def normalize_convert_trade(payload: dict) -> list[NormalizedTransaction]:
     ]
 
 
-def normalize_reward(payload: dict, product: str, id_prefix: str) -> NormalizedTransaction:
+def normalize_reward(payload: dict, product: str, id_prefix: str) -> NormalizedTransaction | None:
     asset = payload.get("asset") or payload.get("rewardAsset")
     amount = payload.get("amount") or payload.get("rewards") or payload.get("rewardAmount")
     ts = payload.get("time") or payload.get("insertTime") or payload.get("completeTime")
+    if not asset or amount is None or amount == "" or ts is None or ts == "":
+        return None
     source_id = payload.get("id") or payload.get("tranId") or payload.get("uuid") or f"{asset}:{amount}:{ts}"
     return NormalizedTransaction(
         source=TransactionSource.BINANCE,
@@ -104,10 +108,12 @@ def normalize_reward(payload: dict, product: str, id_prefix: str) -> NormalizedT
     )
 
 
-def normalize_transfer(payload: dict, product: str, id_prefix: str, is_deposit: bool) -> NormalizedTransaction:
+def normalize_transfer(payload: dict, product: str, id_prefix: str, is_deposit: bool) -> NormalizedTransaction | None:
     asset = payload.get("coin") or payload.get("asset")
     amount = payload.get("amount")
     ts = payload.get("insertTime") or payload.get("applyTime") or payload.get("successTime")
+    if not asset or amount is None or amount == "" or ts is None or ts == "":
+        return None
     source_id = payload.get("id") or payload.get("txId") or f"{asset}:{amount}:{ts}"
     return NormalizedTransaction(
         source=TransactionSource.BINANCE,
