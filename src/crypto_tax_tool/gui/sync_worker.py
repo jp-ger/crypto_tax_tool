@@ -1,4 +1,5 @@
 from datetime import datetime
+import traceback
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -20,10 +21,16 @@ class SyncWorker(QObject):
     def run(self) -> None:
         try:
             self.log.emit("Creating Binance client")
-            client = BinanceClient()
+            client = BinanceClient(progress_callback=self.log.emit)
             self.log.emit("Starting Binance synchronization")
-            result: SyncResult = SyncService(client).sync(start=self.start, end=self.end)
+            result: SyncResult = SyncService(client, progress_callback=self.log.emit).sync(
+                start=self.start,
+                end=self.end,
+            )
         except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
+            message = f"{type(exc).__name__}: {exc}"
+            self.log.emit(f"ERROR during Binance sync: {message}")
+            self.log.emit(traceback.format_exc())
+            self.failed.emit(message)
         else:
             self.finished.emit(result)
