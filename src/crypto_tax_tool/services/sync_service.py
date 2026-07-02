@@ -33,7 +33,11 @@ class SyncService:
             self._log("No backup was created before sync.")
 
         self._log("Loading transactions from exchange...")
-        rows: list[NormalizedTransaction] = self.exchange_client.sync_transactions(start=start, end=end)
+        raw_rows = self.exchange_client.sync_transactions(start=start, end=end)
+        rows: list[NormalizedTransaction] = [row for row in raw_rows if isinstance(row, NormalizedTransaction)]
+        skipped_rows = len(raw_rows) - len(rows)
+        if skipped_rows:
+            self._log(f"Skipped {skipped_rows} incomplete Binance rows before saving.")
         self._log(f"Loaded {len(rows)} transaction rows from exchange.")
 
         self._log("Saving transactions to local database...")
