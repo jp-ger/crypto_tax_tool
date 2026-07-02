@@ -22,7 +22,7 @@ from crypto_tax_tool.gui.sync_worker import SyncWorker
 from crypto_tax_tool.models.manual_entries import ManualLotEntry, ManualPriceEntry
 from crypto_tax_tool.services.config_service import ConfigService
 from crypto_tax_tool.services.report_service import ReportGenerationService, ReportValidationError
-from crypto_tax_tool.updater import check_for_updates
+from crypto_tax_tool.updater import check_for_updates, install_update_from_main
 
 
 class MainWindow(QMainWindow):
@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         self.report_button = QPushButton("Create tax report for selected date range")
         self.report_button.clicked.connect(self._create_tax_report)
 
-        self.update_button = QPushButton("Check for updates")
+        self.update_button = QPushButton("Check / install update")
         self.update_button.clicked.connect(self._check_for_updates)
 
         self.refresh_button = QPushButton("Refresh local counts")
@@ -201,17 +201,30 @@ class MainWindow(QMainWindow):
 
     def _check_for_updates(self) -> None:
         self.update_button.setEnabled(False)
+        self.status_label.setText("Checking for updates.")
         try:
             info = check_for_updates()
-        except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Update check failed: {exc}")
-        else:
             self._append_log(info.message)
-            if info.update_available:
-                if info.asset_url:
-                    self._append_log(f"Download: {info.asset_url}")
-                elif info.release_url:
-                    self._append_log(f"Release page: {info.release_url}")
+            if info.release_url:
+                self._append_log(f"Update reference: {info.release_url}")
+
+            if not info.update_available:
+                self.status_label.setText("No update available.")
+                return
+
+            self.status_label.setText("Installing update.")
+            self._append_log("Installing update automatically...")
+            result = install_update_from_main(progress_callback=self._append_log)
+            self._append_log(result.message)
+            if result.success:
+                self.status_label.setText("Update installed. Restart required.")
+                self._append_log("Update installed. Please close and restart the tool.")
+                self._append_log("If you use the Windows EXE, run build_windows.bat once after closing the tool.")
+            else:
+                self.status_label.setText("Update installation failed.")
+        except Exception as exc:  # noqa: BLE001
+            self.status_label.setText("Update failed.")
+            self._append_log(f"Update failed: {type(exc).__name__}: {exc}")
         finally:
             self.update_button.setEnabled(True)
 
