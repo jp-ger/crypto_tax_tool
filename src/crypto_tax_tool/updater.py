@@ -1,4 +1,9 @@
+import shutil
 import subprocess
+import sys
+import tempfile
+import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -6,10 +11,22 @@ import requests
 from packaging.version import InvalidVersion, Version
 
 
-CURRENT_VERSION = "0.1.1"
+CURRENT_VERSION = "0.1.2"
 GITHUB_REPO = "jp-ger/crypto_tax_tool"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 MAIN_COMMIT_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
+MAIN_ZIP_URL = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/main.zip"
+PROTECTED_LOCAL_ITEMS = {
+    ".env",
+    ".git",
+    "data",
+    "backups",
+    "reports",
+    "logs",
+    "dist",
+    "build",
+    "__pycache__",
+}
 
 
 @dataclass(frozen=True)
@@ -22,12 +39,57 @@ class UpdateInfo:
     message: str
 
 
+@dataclass(frozen=True)
+class InstallUpdateResult:
+    success: bool
+    message: str
+    used_method: str
+    restart_required: bool = True
+
+
 def check_for_updates(timeout_seconds: int = 10) -> UpdateInfo:
     release_info = _check_latest_release(timeout_seconds=timeout_seconds)
     if release_info.latest_version is not None or "failed" in release_info.message.lower():
         return release_info
 
     return _check_main_branch(timeout_seconds=timeout_seconds)
+
+
+def install_update_from_main(
+    progress_callback: Callable[[str], None] | None = None,
+    timeout_seconds: int = 30,
+) -> InstallUpdateResult:
+    """Install the latest main branch version while preserving local user data.
+
+    Preferred path: git pull origin main, because it is safest for a source checkout.
+    Fallback path: download GitHub main.zip and replace project files while preserving
+    .env, .git, data, backups, reports and logs.
+    """
+
+    def log(message: str) -> None:
+        if progress_callback:
+            progress_callback(message)
+
+    project_root = _find_project_root()
+    if project_root is None:
+        return InstallUpdateResult(
+            success=False,
+            used_method="none",
+            message="Could not find the project root. Automatic update is not available for this installation.",
+            restart_required=False,
+        )
+
+    log(f"Project root: {project_root}")
+
+    if _is_git_checkout(project_root):
+        log("Git checkout detected. Running: git pull origin main")
+        result = _run_git_pull(project_root)
+        if result.success:
+            return result
+        log(result.message)
+        log("Git pull failed. Trying ZIP update fallback...")
+
+    return _install_from_main_zip(project_root, log=log, timeout_seconds=timeout_seconds)
 
 
 def _check_latest_release(timeout_seconds: int) -> UpdateInfo:
@@ -114,7 +176,7 @@ def _check_main_branch(timeout_seconds: int) -> UpdateInfo:
         if update_available:
             message = (
                 f"Main branch update available. Local commit: {short_local_sha}; "
-                f"latest main: {short_latest_sha}. Run: git pull origin main"
+                f"latest main: {short_latest_sha}. Click update again to install automatically."
             )
         else:
             message = f"You are up to date with main: {short_local_sha}."
@@ -123,7 +185,7 @@ def _check_main_branch(timeout_seconds: int) -> UpdateInfo:
         message = (
             f"No GitHub release found yet. Latest main commit: {short_latest_sha}"
             + (f" from {commit_date}" if commit_date else "")
-            + ". If you installed from source, run: git pull origin main"
+            + ". Click update to download and install main.zip automatically."
         )
 
     return UpdateInfo(
@@ -136,8 +198,129 @@ def _check_main_branch(timeout_seconds: int) -> UpdateInfo:
     )
 
 
+def _run_git_pull(project_root: Path) -> InstallUpdateResult:
+    try:
+        result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd=project_root,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return InstallUpdateResult(
+            success=False,
+            used_method="git",
+            message=f"Git pull could not be started: {exc}",
+            restart_required=False,
+        )
+
+    output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
+    if result.returncode == 0:
+        return InstallUpdateResult(
+            success=True,
+            used_method="git",
+            message="Update installed via git pull. Restart the tool and rebuild the EXE if needed."
+            + (f"\n{output}" if output else ""),
+        )
+
+    return InstallUpdateResult(
+        success=False,
+        used_method="git",
+        message=f"Git pull failed with exit code {result.returncode}." + (f"\n{output}" if output else ""),
+        restart_required=False,
+    )
+
+
+def _install_from_main_zip(
+    project_root: Path,
+    log: Callable[[str], None],
+    timeout_seconds: int,
+) -> InstallUpdateResult:
+    try:
+        with tempfile.TemporaryDirectory(prefix="crypto_tax_tool_update_") as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            zip_path = tmp_path / "main.zip"
+            extract_path = tmp_path / "extract"
+
+            log("Downloading latest main.zip from GitHub...")
+            with requests.get(MAIN_ZIP_URL, stream=True, timeout=timeout_seconds) as response:
+                response.raise_for_status()
+                with zip_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+
+            log("Extracting update package...")
+            with zipfile.ZipFile(zip_path) as archive:
+                archive.extractall(extract_path)
+
+            source_dirs = [item for item in extract_path.iterdir() if item.is_dir()]
+            if not source_dirs:
+                raise RuntimeError("Downloaded ZIP did not contain a project folder.")
+            source_root = source_dirs[0]
+
+            log("Copying update files while preserving local data...")
+            copied = _copy_update_files(source_root=source_root, target_root=project_root)
+            log(f"Updated {copied} files/folders.")
+
+    except Exception as exc:  # noqa: BLE001
+        return InstallUpdateResult(
+            success=False,
+            used_method="zip",
+            message=f"ZIP update failed: {type(exc).__name__}: {exc}",
+            restart_required=False,
+        )
+
+    return InstallUpdateResult(
+        success=True,
+        used_method="zip",
+        message=(
+            "Update installed from GitHub main.zip. Preserved .env, data, backups, reports and logs. "
+            "Restart the tool and rebuild the EXE if needed."
+        ),
+    )
+
+
+def _copy_update_files(source_root: Path, target_root: Path) -> int:
+    copied = 0
+    for item in source_root.iterdir():
+        if item.name in PROTECTED_LOCAL_ITEMS:
+            continue
+        target = target_root / item.name
+        if item.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+        copied += 1
+    return copied
+
+
+def _find_project_root() -> Path | None:
+    candidates = [Path.cwd()]
+    if not getattr(sys, "frozen", False):
+        candidates.append(Path(__file__).resolve().parents[2])
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent)
+        candidates.append(Path(sys.executable).resolve().parent.parent)
+
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").exists() or (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _is_git_checkout(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
 def _get_local_git_commit_sha() -> str | None:
-    for path in [Path.cwd(), Path(__file__).resolve().parents[2]]:
+    project_root = _find_project_root()
+    candidates = [candidate for candidate in [Path.cwd(), project_root] if candidate is not None]
+    for path in candidates:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
