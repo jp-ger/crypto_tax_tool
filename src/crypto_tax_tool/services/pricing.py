@@ -30,7 +30,7 @@ class StaticPriceProvider(PriceProvider):
         return HistoricalPrice(
             asset=asset,
             quote_asset=quote_asset,
-            timestamp=timestamp,
+            timestamp=_hour_floor(timestamp),
             price=value,
             provider=self.provider_name,
             pair=f"{asset}{quote_asset}",
@@ -42,18 +42,23 @@ class HistoricalPriceService:
         self.providers = providers or []
 
     def get_price(self, asset: str, quote_asset: str, timestamp: datetime) -> HistoricalPrice:
-        manual = get_manual_price(asset, quote_asset, timestamp)
+        lookup_timestamp = _hour_floor(timestamp)
+        manual = get_manual_price(asset, quote_asset, lookup_timestamp)
         if manual:
             return manual
 
-        cached = get_cached_price(asset, quote_asset, timestamp)
+        cached = get_cached_price(asset, quote_asset, lookup_timestamp)
         if cached:
             return cached
 
         for provider in self.providers:
-            price = provider.get_price(asset, quote_asset, timestamp)
+            price = provider.get_price(asset, quote_asset, lookup_timestamp)
             if price:
                 save_price(price)
                 return price
 
-        raise PriceNotFoundError(f"No price found for {asset}/{quote_asset} at {timestamp.isoformat()}.")
+        raise PriceNotFoundError(f"No price found for {asset}/{quote_asset} at {lookup_timestamp.isoformat()}.")
+
+
+def _hour_floor(value: datetime) -> datetime:
+    return value.replace(minute=0, second=0, microsecond=0)
