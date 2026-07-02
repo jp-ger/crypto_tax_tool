@@ -17,7 +17,7 @@ from crypto_tax_tool.api.binance.normalizers import (
     normalize_transfer,
 )
 from crypto_tax_tool.api.binance.pagination import extract_rows, paginate_numbered
-from crypto_tax_tool.api.binance.spot_sync import split_into_daily_windows
+from crypto_tax_tool.api.binance.spot_sync import split_into_daily_windows, split_into_monthly_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
 from crypto_tax_tool.database.sqlite_store import get_sync_state, set_sync_state
@@ -32,6 +32,7 @@ LAST_SYNC_END_KEY = "last_sync_end"
 INCREMENTAL_OVERLAP = timedelta(days=1)
 EMPTY_WINDOW_PREFIX = "binance_empty_window"
 UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
+SPOT_MONTHLY_UNSUPPORTED_KEY = "binance_spot_monthly_windows_unsupported"
 
 
 def _to_millis(value: datetime) -> int:
@@ -172,12 +173,18 @@ class BinanceClient(ExchangeClient):
             self._log("No account spot trade symbols detected.")
             return records
 
-        windows = split_into_daily_windows(start, end)
-        total_requests = len(traded_symbols) * len(windows)
-        self._log(
-            f"Importing spot trades for {len(traded_symbols)} symbols over {len(windows)} daily windows "
-            f"({total_requests} Binance requests maximum before cache skips)."
-        )
+        if get_sync_state(SPOT_MONTHLY_UNSUPPORTED_KEY):
+            windows = split_into_daily_windows(start, end)
+            self._log(
+                f"Importing spot trades for {len(traded_symbols)} symbols over {len(windows)} daily windows "
+                "because Binance rejected larger spot trade windows earlier."
+            )
+        else:
+            windows = split_into_monthly_windows(start, end)
+            self._log(
+                f"Importing spot trades for {len(traded_symbols)} symbols over {len(windows)} monthly windows. "
+                "If Binance rejects monthly windows, the tool falls back to daily windows automatically."
+            )
 
         for index, item in enumerate(traded_symbols, start=1):
             self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
@@ -237,7 +244,7 @@ class BinanceClient(ExchangeClient):
         windows: list | None = None,
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        windows = windows or split_into_daily_windows(start, end)
+        windows = windows or split_into_monthly_windows(start, end)
         started = time.monotonic()
         skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
@@ -245,37 +252,107 @@ class BinanceClient(ExchangeClient):
             if get_sync_state(cache_key):
                 skipped_cached += 1
                 continue
-            if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
+            if window_index == 1 or window_index % 10 == 0 or window_index == len(windows):
                 elapsed = max(time.monotonic() - started, 0.1)
                 per_window = elapsed / window_index
                 remaining = int(per_window * (len(windows) - window_index))
+                window_label = "daily" if self._is_daily_window(window.start, window.end) else "monthly"
                 self._log(
-                    f"{symbol.symbol}: daily window {window_index}/{len(windows)} | "
+                    f"{symbol.symbol}: {window_label} window {window_index}/{len(windows)} | "
                     f"estimated remaining for symbol: {remaining}s"
                 )
-            rows = self._signed_get(
-                "/api/v3/myTrades",
-                {
-                    "symbol": symbol.symbol,
-                    "startTime": _to_millis(window.start),
-                    "endTime": _to_millis(window.end),
-                    "limit": 1000,
-                },
-            )
-            if not isinstance(rows, list):
+
+            rows = self._request_spot_window(symbol, window.start, window.end)
+            if rows is None:
+                self._log(
+                    f"{symbol.symbol}: Binance rejected a larger spot window. "
+                    "Caching daily fallback for future syncs."
+                )
+                set_sync_state(SPOT_MONTHLY_UNSUPPORTED_KEY, "1")
+                records.extend(self._get_spot_trades_daily(symbol, window.start, window.end))
                 continue
             if not rows:
                 set_sync_state(cache_key, "1")
                 continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                row["symbol"] = symbol.symbol
-                records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
+            if len(rows) >= 1000 and not self._is_daily_window(window.start, window.end):
+                self._log(
+                    f"{symbol.symbol}: larger window returned 1000 rows. "
+                    "Falling back to daily windows to avoid missing trades."
+                )
+                records.extend(self._get_spot_trades_daily(symbol, window.start, window.end))
+                continue
+            records.extend(self._normalize_spot_rows(symbol, rows))
+            self._update_symbol_trade_range(symbol.symbol, rows)
             self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in current window.")
         if skipped_cached:
             self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty windows.")
         return records
+
+    def _get_spot_trades_daily(self, symbol: BinanceSymbol, start: datetime, end: datetime) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        daily_windows = split_into_daily_windows(start, end)
+        skipped_cached = 0
+        for day_index, day_window in enumerate(daily_windows, start=1):
+            cache_key = self._empty_window_key("spot", symbol.symbol, day_window.start, day_window.end)
+            if get_sync_state(cache_key):
+                skipped_cached += 1
+                continue
+            if day_index == 1 or day_index % 30 == 0 or day_index == len(daily_windows):
+                self._log(f"{symbol.symbol}: daily fallback window {day_index}/{len(daily_windows)}")
+            rows = self._request_spot_window(symbol, day_window.start, day_window.end)
+            if not rows:
+                set_sync_state(cache_key, "1")
+                continue
+            records.extend(self._normalize_spot_rows(symbol, rows))
+            self._update_symbol_trade_range(symbol.symbol, rows)
+            self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in daily fallback window.")
+        if skipped_cached:
+            self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty daily fallback windows.")
+        return records
+
+    def _request_spot_window(self, symbol: BinanceSymbol, start: datetime, end: datetime) -> list[dict] | None:
+        try:
+            rows = self._signed_get(
+                "/api/v3/myTrades",
+                {
+                    "symbol": symbol.symbol,
+                    "startTime": _to_millis(start),
+                    "endTime": _to_millis(end),
+                    "limit": 1000,
+                },
+            )
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 400 and not self._is_daily_window(start, end):
+                return None
+            raise
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def _normalize_spot_rows(self, symbol: BinanceSymbol, rows: list[dict]) -> list[NormalizedTransaction]:
+        records: list[NormalizedTransaction] = []
+        for row in rows:
+            row["symbol"] = symbol.symbol
+            records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
+        return records
+
+    def _update_symbol_trade_range(self, symbol: str, rows: list[dict]) -> None:
+        times = [int(row["time"]) for row in rows if row.get("time") is not None]
+        if not times:
+            return
+        first_key = f"binance_spot_symbol_first_trade:{symbol}"
+        last_key = f"binance_spot_symbol_last_trade:{symbol}"
+        existing_first = get_sync_state(first_key)
+        existing_last = get_sync_state(last_key)
+        first_seen = min(times)
+        last_seen = max(times)
+        if not existing_first or first_seen < int(existing_first):
+            set_sync_state(first_key, str(first_seen))
+        if not existing_last or last_seen > int(existing_last):
+            set_sync_state(last_key, str(last_seen))
+
+    def _is_daily_window(self, start: datetime, end: datetime) -> bool:
+        return (end - start) <= timedelta(days=1, seconds=1)
 
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
