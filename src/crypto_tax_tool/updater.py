@@ -11,7 +11,7 @@ import requests
 from packaging.version import InvalidVersion, Version
 
 
-CURRENT_VERSION = "0.1.2"
+CURRENT_VERSION = "0.1.3"
 GITHUB_REPO = "jp-ger/crypto_tax_tool"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 MAIN_COMMIT_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
@@ -59,12 +59,7 @@ def install_update_from_main(
     progress_callback: Callable[[str], None] | None = None,
     timeout_seconds: int = 30,
 ) -> InstallUpdateResult:
-    """Install the latest main branch version while preserving local user data.
-
-    Preferred path: git pull origin main, because it is safest for a source checkout.
-    Fallback path: download GitHub main.zip and replace project files while preserving
-    .env, .git, data, backups, reports and logs.
-    """
+    """Install latest main branch into the folder of the running app/source checkout."""
 
     def log(message: str) -> None:
         if progress_callback:
@@ -80,6 +75,7 @@ def install_update_from_main(
         )
 
     log(f"Project root: {project_root}")
+    log(f"Running location: {_running_location()}")
 
     if _is_git_checkout(project_root):
         log("Git checkout detected. Running: git pull origin main")
@@ -261,7 +257,8 @@ def _install_from_main_zip(
                 raise RuntimeError("Downloaded ZIP did not contain a project folder.")
             source_root = source_dirs[0]
 
-            log("Copying update files while preserving local data...")
+            log(f"Copying update files to: {project_root}")
+            log("Preserving local .env, data, backups, reports, logs, dist and build folders...")
             copied = _copy_update_files(source_root=source_root, target_root=project_root)
             log(f"Updated {copied} files/folders.")
 
@@ -277,7 +274,8 @@ def _install_from_main_zip(
         success=True,
         used_method="zip",
         message=(
-            "Update installed from GitHub main.zip. Preserved .env, data, backups, reports and logs. "
+            f"Update installed from GitHub main.zip into {project_root}. "
+            "Preserved .env, data, backups, reports and logs. "
             "Restart the tool and rebuild the EXE if needed."
         ),
     )
@@ -290,27 +288,50 @@ def _copy_update_files(source_root: Path, target_root: Path) -> int:
             continue
         target = target_root / item.name
         if item.is_dir():
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(item, target)
+            _replace_dir(source=item, target=target)
         else:
             shutil.copy2(item, target)
         copied += 1
     return copied
 
 
-def _find_project_root() -> Path | None:
-    candidates = [Path.cwd()]
-    if not getattr(sys, "frozen", False):
-        candidates.append(Path(__file__).resolve().parents[2])
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent)
-        candidates.append(Path(sys.executable).resolve().parent.parent)
+def _replace_dir(source: Path, target: Path) -> None:
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(source, target, ignore=_ignore_generated_files)
 
+
+def _ignore_generated_files(directory: str, names: list[str]) -> set[str]:
+    return {name for name in names if name == "__pycache__" or name.endswith(".pyc") or name.endswith(".pyo")}
+
+
+def _running_location() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def _find_project_root() -> Path | None:
+    """Find the actual running app/source folder, not an arbitrary current working directory."""
+    running_location = _running_location()
+    candidates = [
+        running_location,
+        *running_location.parents,
+    ]
+
+    # Last-resort fallback only. This is intentionally after the running location so
+    # a Desktop shell working directory cannot override a D:\ installation.
+    cwd = Path.cwd().resolve()
+    candidates.extend([cwd, *cwd.parents])
+
+    seen: set[Path] = set()
     for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         if (candidate / "pyproject.toml").exists() or (candidate / ".git").exists():
             return candidate
-    return None
+    return running_location if running_location.exists() else None
 
 
 def _is_git_checkout(path: Path) -> bool:
@@ -319,7 +340,7 @@ def _is_git_checkout(path: Path) -> bool:
 
 def _get_local_git_commit_sha() -> str | None:
     project_root = _find_project_root()
-    candidates = [candidate for candidate in [Path.cwd(), project_root] if candidate is not None]
+    candidates = [candidate for candidate in [project_root, Path.cwd().resolve()] if candidate is not None]
     for path in candidates:
         try:
             result = subprocess.run(
