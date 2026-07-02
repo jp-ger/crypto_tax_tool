@@ -30,12 +30,19 @@ BINANCE_SPOT_HISTORY_START = datetime(2017, 7, 14)
 TRADED_SYMBOL_CACHE_KEY = "binance_spot_traded_symbols"
 LAST_SYNC_END_KEY = "last_sync_end"
 INCREMENTAL_OVERLAP = timedelta(days=1)
+EMPTY_WINDOW_PREFIX = "binance_empty_window"
+UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
 
 
 def _to_millis(value: datetime) -> int:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return int(value.timestamp() * 1000)
+
+
+def _append_if_valid(records: list[NormalizedTransaction], tx: NormalizedTransaction | None) -> None:
+    if isinstance(tx, NormalizedTransaction):
+        records.append(tx)
 
 
 class BinanceClient(ExchangeClient):
@@ -66,6 +73,7 @@ class BinanceClient(ExchangeClient):
         response = with_retries(
             lambda: self.session.get(f"{self.base_url}/api/v3/exchangeInfo", timeout=30)
         )
+        response.raise_for_status()
         symbols = parse_exchange_info(response.json())
         self._log(f"Loaded {len(symbols)} Binance exchange symbols.")
         return symbols
@@ -168,7 +176,7 @@ class BinanceClient(ExchangeClient):
         total_requests = len(traded_symbols) * len(windows)
         self._log(
             f"Importing spot trades for {len(traded_symbols)} symbols over {len(windows)} daily windows "
-            f"({total_requests} Binance requests maximum)."
+            f"({total_requests} Binance requests maximum before cache skips)."
         )
 
         for index, item in enumerate(traded_symbols, start=1):
@@ -217,10 +225,7 @@ class BinanceClient(ExchangeClient):
     def _symbol_has_any_trades(self, symbol: BinanceSymbol) -> bool:
         rows = self._signed_get(
             "/api/v3/myTrades",
-            {
-                "symbol": symbol.symbol,
-                "limit": 1,
-            },
+            {"symbol": symbol.symbol, "limit": 1},
         )
         return isinstance(rows, list) and len(rows) > 0
 
@@ -234,7 +239,12 @@ class BinanceClient(ExchangeClient):
         records: list[NormalizedTransaction] = []
         windows = windows or split_into_daily_windows(start, end)
         started = time.monotonic()
+        skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
+            cache_key = self._empty_window_key("spot", symbol.symbol, window.start, window.end)
+            if get_sync_state(cache_key):
+                skipped_cached += 1
+                continue
             if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
                 elapsed = max(time.monotonic() - started, 0.1)
                 per_window = elapsed / window_index
@@ -254,19 +264,28 @@ class BinanceClient(ExchangeClient):
             )
             if not isinstance(rows, list):
                 continue
+            if not rows:
+                set_sync_state(cache_key, "1")
+                continue
             for row in rows:
                 if not isinstance(row, dict):
                     continue
                 row["symbol"] = symbol.symbol
                 records.append(normalize_spot_trade(row, symbol.base_asset, symbol.quote_asset))
-            if rows:
-                self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in current window.")
+            self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in current window.")
+        if skipped_cached:
+            self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty windows.")
         return records
 
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         windows = split_into_daily_windows(start, end)
+        skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
+            cache_key = self._empty_window_key("convert", "tradeFlow", window.start, window.end)
+            if get_sync_state(cache_key):
+                skipped_cached += 1
+                continue
             if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
                 self._log(f"Convert trade progress: window {window_index}/{len(windows)}")
             rows = paginate_numbered(
@@ -282,14 +301,24 @@ class BinanceClient(ExchangeClient):
                 rows_key="list",
                 page_size=1000,
             )
+            if not rows:
+                set_sync_state(cache_key, "1")
+                continue
             for row in rows:
                 records.extend(normalize_convert_trade(row))
+        if skipped_cached:
+            self._log(f"Convert trades: skipped {skipped_cached} cached empty windows.")
         return records
 
     def sync_asset_rewards(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         windows = split_into_daily_windows(start, end)
+        skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
+            cache_key = self._empty_window_key("asset_reward", "assetDividend", window.start, window.end)
+            if get_sync_state(cache_key):
+                skipped_cached += 1
+                continue
             if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
                 self._log(f"Asset reward progress: window {window_index}/{len(windows)}")
             rows = paginate_numbered(
@@ -305,8 +334,13 @@ class BinanceClient(ExchangeClient):
                 rows_key="rows",
                 page_size=500,
             )
+            if not rows:
+                set_sync_state(cache_key, "1")
+                continue
             for row in rows:
-                records.append(normalize_reward(row, product="asset_dividend", id_prefix="assetDividend"))
+                _append_if_valid(records, normalize_reward(row, product="asset_dividend", id_prefix="assetDividend"))
+        if skipped_cached:
+            self._log(f"Asset rewards: skipped {skipped_cached} cached empty windows.")
         return records
 
     def sync_simple_earn_rewards(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
@@ -317,49 +351,116 @@ class BinanceClient(ExchangeClient):
         ]
         windows = split_into_daily_windows(start, end)
         for path, product in endpoints:
+            endpoint_key = f"{UNAVAILABLE_ENDPOINT_PREFIX}:{product}"
+            if get_sync_state(endpoint_key):
+                self._log(f"Skipping unavailable Simple Earn endpoint cached earlier: {product}")
+                continue
             self._log(f"Simple Earn endpoint: {product}")
+            skipped_cached = 0
             for window_index, window in enumerate(windows, start=1):
+                cache_key = self._empty_window_key("simple_earn", product, window.start, window.end)
+                if get_sync_state(cache_key):
+                    skipped_cached += 1
+                    continue
                 if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
                     self._log(f"{product} progress: window {window_index}/{len(windows)}")
-                rows = paginate_numbered(
-                    lambda page: self._signed_get(
-                        path,
-                        {
-                            "startTime": _to_millis(window.start),
-                            "endTime": _to_millis(window.end),
-                            "current": page,
-                            "size": 100,
-                        },
-                    ),
+                rows = self._fetch_numbered_optional(
+                    path=path,
                     rows_key="rows",
                     page_size=100,
+                    params={
+                        "startTime": _to_millis(window.start),
+                        "endTime": _to_millis(window.end),
+                        "size": 100,
+                    },
+                    product=product,
                 )
+                if rows is None:
+                    set_sync_state(endpoint_key, "1")
+                    self._log(f"Simple Earn endpoint unavailable for this account/API key: {product}. Cached skip.")
+                    break
+                if not rows:
+                    set_sync_state(cache_key, "1")
+                    continue
                 for row in rows:
-                    records.append(normalize_reward(row, product=product, id_prefix=product))
+                    _append_if_valid(records, normalize_reward(row, product=product, id_prefix=product))
+            if skipped_cached:
+                self._log(f"{product}: skipped {skipped_cached} cached empty windows.")
         return records
 
     def sync_transfers(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         windows = split_into_daily_windows(start, end)
+        skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
             if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
                 self._log(f"Transfer progress: window {window_index}/{len(windows)}")
-            deposits = self._signed_get(
-                "/sapi/v1/capital/deposit/hisrec",
-                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
-            )
-            for row in extract_rows(deposits):
-                records.append(normalize_transfer(row, "deposit", "deposit", True))
 
-            withdrawals = self._signed_get(
-                "/sapi/v1/capital/withdraw/history",
-                {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
-            )
-            for row in extract_rows(withdrawals):
-                records.append(normalize_transfer(row, "withdrawal", "withdrawal", False))
+            deposit_key = self._empty_window_key("transfer", "deposit", window.start, window.end)
+            if get_sync_state(deposit_key):
+                skipped_cached += 1
+            else:
+                deposits = self._signed_get(
+                    "/sapi/v1/capital/deposit/hisrec",
+                    {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
+                )
+                deposit_rows = extract_rows(deposits)
+                if not deposit_rows:
+                    set_sync_state(deposit_key, "1")
+                for row in deposit_rows:
+                    _append_if_valid(records, normalize_transfer(row, "deposit", "deposit", True))
+
+            withdrawal_key = self._empty_window_key("transfer", "withdrawal", window.start, window.end)
+            if get_sync_state(withdrawal_key):
+                skipped_cached += 1
+            else:
+                withdrawals = self._signed_get(
+                    "/sapi/v1/capital/withdraw/history",
+                    {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end)},
+                )
+                withdrawal_rows = extract_rows(withdrawals)
+                if not withdrawal_rows:
+                    set_sync_state(withdrawal_key, "1")
+                for row in withdrawal_rows:
+                    _append_if_valid(records, normalize_transfer(row, "withdrawal", "withdrawal", False))
+        if skipped_cached:
+            self._log(f"Transfers: skipped {skipped_cached} cached empty windows.")
         return records
 
-    def _signed_get(self, path: str, params: dict[str, object] | None = None) -> dict | list:
+    def _fetch_numbered_optional(
+        self,
+        path: str,
+        rows_key: str,
+        page_size: int,
+        params: dict[str, object],
+        product: str,
+    ) -> list[dict] | None:
+        result: list[dict] = []
+        page = 1
+        while True:
+            payload = dict(params)
+            payload["current"] = page
+            rows_payload = self._signed_get(path, payload, ignore_bad_request=True)
+            if rows_payload is None:
+                return None
+            rows = extract_rows(rows_payload, rows_key)
+            if not rows:
+                break
+            result.extend(rows)
+            if len(rows) < page_size:
+                break
+            page += 1
+        return result
+
+    def _empty_window_key(self, product: str, item: str, start: datetime, end: datetime) -> str:
+        return f"{EMPTY_WINDOW_PREFIX}:{product}:{item}:{_to_millis(start)}:{_to_millis(end)}"
+
+    def _signed_get(
+        self,
+        path: str,
+        params: dict[str, object] | None = None,
+        ignore_bad_request: bool = False,
+    ) -> dict | list | None:
         if not self.api_key or not self.api_secret:
             raise ValueError("Binance API key and secret are required for signed endpoints.")
         payload = dict(params or {})
@@ -368,5 +469,8 @@ class BinanceClient(ExchangeClient):
         signature = hmac.new(self.api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
         url = f"{self.base_url}{path}?{query}&signature={signature}"
         response = with_retries(lambda: self.session.get(url, timeout=30))
+        if ignore_bad_request and response.status_code == 400:
+            self._log(f"Optional Binance endpoint returned 400 and will be skipped: {path}")
+            return None
         response.raise_for_status()
         return response.json()
