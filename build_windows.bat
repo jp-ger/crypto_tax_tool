@@ -24,6 +24,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
+set "APP_NAME=CryptoTaxTool"
+set "TIMESTAMP=%DATE:~-4%%DATE:~3,2%%DATE:~0,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+set "TIMESTAMP=%TIMESTAMP: =0%"
+set "BUILD_TMP=build_tmp_%TIMESTAMP%"
+set "SPEC_TMP=spec_tmp_%TIMESTAMP%"
+
+echo Closing running Crypto Tax Tool processes if present...
+taskkill /F /IM CryptoTaxTool.exe >nul 2>nul
+for /f "tokens=2" %%P in ('tasklist /FI "IMAGENAME eq python.exe" /FI "WINDOWTITLE eq Crypto Tax Tool*" /FO TABLE /NH 2^>nul') do taskkill /F /PID %%P >nul 2>nul
+timeout /t 2 /nobreak >nul
+
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment...
     python -m venv .venv --clear
@@ -76,17 +87,35 @@ if errorlevel 1 (
 )
 
 echo.
-echo Building EXE with PyInstaller...
+echo Preparing clean build folders...
 if not exist "dist" mkdir dist
+if exist "%BUILD_TMP%" rmdir /s /q "%BUILD_TMP%"
+if exist "%SPEC_TMP%" rmdir /s /q "%SPEC_TMP%"
+mkdir "%BUILD_TMP%"
+mkdir "%SPEC_TMP%"
+
+echo Removing generated Python cache files...
+for /d /r %%D in (__pycache__) do @if exist "%%D" rmdir /s /q "%%D" >nul 2>nul
+
+echo.
+echo Building EXE with PyInstaller...
 python -m PyInstaller ^
-    --name CryptoTaxTool ^
+    --name %APP_NAME% ^
     --onefile ^
     --windowed ^
     --clean ^
+    --noconfirm ^
+    --workpath "%BUILD_TMP%" ^
+    --specpath "%SPEC_TMP%" ^
+    --distpath dist ^
     --paths src ^
     --collect-all PySide6 ^
     src\crypto_tax_tool\__main__.py
 if errorlevel 1 goto :error
+
+echo Cleaning temporary build folders...
+rmdir /s /q "%BUILD_TMP%" >nul 2>nul
+rmdir /s /q "%SPEC_TMP%" >nul 2>nul
 
 echo.
 echo ============================================================
@@ -101,5 +130,10 @@ exit /b 0
 :error
 echo.
 echo ERROR: Setup or build failed.
+echo Build temp folder: %cd%\%BUILD_TMP%
+echo Spec temp folder: %cd%\%SPEC_TMP%
+echo.
+echo If Windows still reports "Zugriff verweigert", close CryptoTaxTool.exe/python.exe in Task Manager
+echo and run this file again.
 pause
 exit /b 1
