@@ -64,6 +64,9 @@ class MainWindow(QMainWindow):
         self.sync_button = QPushButton("Start Binance sync")
         self.sync_button.clicked.connect(self._run_sync)
 
+        self.full_resync_button = QPushButton("Full resync selected date range")
+        self.full_resync_button.clicked.connect(self._run_full_resync)
+
         self.report_button = QPushButton("Create tax report for selected date range")
         self.report_button.clicked.connect(self._create_tax_report)
 
@@ -128,6 +131,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.end_date)
         layout.addWidget(self.test_button)
         layout.addWidget(self.sync_button)
+        layout.addWidget(self.full_resync_button)
         layout.addWidget(self.report_button)
         layout.addWidget(self.update_button)
         layout.addWidget(self.refresh_button)
@@ -247,10 +251,11 @@ class MainWindow(QMainWindow):
             self._append_log(f"Report failed: {exc}")
         else:
             self.status_label.setText("Report created.")
+            income_count = getattr(result, "income_events", 0)
             self._append_log(
                 f"Report created for {report_start.date()} to {report_end.date()}: {result.output_dir} | "
                 f"transactions: {result.transactions}, disposals: {result.disposals}, "
-                f"open lots: {result.open_lots}, manual lots: {result.manual_lots}"
+                f"income events: {income_count}, open lots: {result.open_lots}, manual lots: {result.manual_lots}"
             )
             if result.backup_path:
                 self._append_log(f"Backup before report: {result.backup_path}")
@@ -297,13 +302,27 @@ class MainWindow(QMainWindow):
             self._refresh_count()
 
     def _run_sync(self) -> None:
+        self._start_sync(full_resync=False)
+
+    def _run_full_resync(self) -> None:
+        self._start_sync(full_resync=True)
+
+    def _start_sync(self, full_resync: bool) -> None:
         start, end = self._selected_start_end()
-        self.status_label.setText("Sync running in background.")
-        self._append_log(f"Starting sync from {start.isoformat()} to {end.isoformat()}")
+        if full_resync:
+            self.status_label.setText("Full resync running in background.")
+            self._append_log(
+                f"Starting FULL resync from {start.isoformat()} to {end.isoformat()} "
+                "(ignoring incremental sync state)"
+            )
+        else:
+            self.status_label.setText("Sync running in background.")
+            self._append_log(f"Starting sync from {start.isoformat()} to {end.isoformat()}")
         self.sync_button.setEnabled(False)
+        self.full_resync_button.setEnabled(False)
 
         self.sync_thread = QThread()
-        self.sync_worker = SyncWorker(start=start, end=end)
+        self.sync_worker = SyncWorker(start=start, end=end, full_resync=full_resync)
         self.sync_worker.moveToThread(self.sync_thread)
         self.sync_thread.started.connect(self.sync_worker.run)
         self.sync_worker.log.connect(self._append_log)
@@ -330,5 +349,6 @@ class MainWindow(QMainWindow):
 
     def _sync_thread_finished(self) -> None:
         self.sync_button.setEnabled(True)
+        self.full_resync_button.setEnabled(True)
         self.sync_worker = None
         self.sync_thread = None
