@@ -37,3 +37,40 @@ class CsvTaxReportExporter:
                     ]
                 )
         return path
+
+
+class CsvIncomeReportExporter:
+    def export(self, summary: TaxSummary, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(
+                [
+                    "transaction_id",
+                    "received_at",
+                    "asset",
+                    "quantity",
+                    "income_eur",
+                    "eur_price",
+                    "product",
+                    "raw_type",
+                    "price_provider",
+                    "price_pair",
+                ]
+            )
+            for row in summary.income_rows:
+                writer.writerow(
+                    [
+                        row.transaction_id,
+                        row.received_at,
+                        row.asset,
+                        str(row.quantity),
+                        str(row.income_eur),
+                        str(row.price_eur),
+                        row.product,
+                        row.raw_type,
+                        row.price_provider,
+                        row.price_pair,
+                    ]
+                )
+        return path
