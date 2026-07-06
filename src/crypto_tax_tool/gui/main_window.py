@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import (
+    QComboBox,
     QDateEdit,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -57,6 +58,11 @@ class MainWindow(QMainWindow):
         self.end_date.setCalendarPopup(True)
         self.end_date.setDisplayFormat("yyyy-MM-dd")
         self.end_date.setDate(self.end_date.date().currentDate())
+
+        self.report_number_format = QComboBox()
+        self.report_number_format.addItem("German / EU Excel (1.234,56)", "german")
+        self.report_number_format.addItem("International / US Excel (1,234.56)", "international")
+        self.report_number_format.setCurrentIndex(0)
 
         self.test_button = QPushButton("Test Binance connection")
         self.test_button.clicked.connect(self._test_binance_connection)
@@ -129,6 +135,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.start_date)
         layout.addWidget(QLabel("Sync / report end date"))
         layout.addWidget(self.end_date)
+        layout.addWidget(QLabel("Report number/date format"))
+        layout.addWidget(self.report_number_format)
         layout.addWidget(self.test_button)
         layout.addWidget(self.sync_button)
         layout.addWidget(self.full_resync_button)
@@ -179,6 +187,9 @@ class MainWindow(QMainWindow):
         start = datetime.combine(self.start_date.date().toPython(), datetime.min.time())
         end = datetime.combine(self.end_date.date().toPython(), datetime.max.time())
         return start, end
+
+    def _selected_number_format(self) -> str:
+        return str(self.report_number_format.currentData() or "international")
 
     def _save_api_credentials(self) -> None:
         try:
@@ -234,12 +245,14 @@ class MainWindow(QMainWindow):
 
     def _create_tax_report(self) -> None:
         report_start, report_end = self._selected_start_end()
+        number_format = self._selected_number_format()
         self.status_label.setText("Creating tax report.")
         self.report_button.setEnabled(False)
         try:
             result = ReportGenerationService().generate_tax_report(
                 report_start=report_start,
                 report_end=report_end,
+                number_format=number_format,
             )
         except ReportValidationError as exc:
             self.status_label.setText("Report validation failed.")
@@ -254,7 +267,7 @@ class MainWindow(QMainWindow):
             income_count = getattr(result, "income_events", 0)
             self._append_log(
                 f"Report created for {report_start.date()} to {report_end.date()}: {result.output_dir} | "
-                f"transactions: {result.transactions}, disposals: {result.disposals}, "
+                f"number format: {number_format}, transactions: {result.transactions}, disposals: {result.disposals}, "
                 f"income events: {income_count}, open lots: {result.open_lots}, manual lots: {result.manual_lots}"
             )
             if result.backup_path:
