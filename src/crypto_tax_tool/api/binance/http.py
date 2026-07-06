@@ -9,6 +9,7 @@ T = TypeVar("T")
 
 RETRY_STATUS_CODES = {418, 429, 500, 502, 503, 504}
 OPTIONAL_BAD_REQUEST_PATHS = (
+    "/api/v3/myTrades",
     "/sapi/v1/simple-earn/flexible/history/rewardsRecord",
     "/sapi/v1/simple-earn/locked/history/rewardsRecord",
 )
