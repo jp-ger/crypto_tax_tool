@@ -30,17 +30,36 @@ class DisposalResult:
 
 
 @dataclass(frozen=True)
+class IncomeResult:
+    transaction_id: str
+    asset: str
+    quantity: Decimal
+    income_eur: Decimal
+    received_at: datetime
+    product: str | None
+    raw_type: str | None
+    price_eur: Decimal
+    price_provider: str
+    price_pair: str | None
+
+
+@dataclass(frozen=True)
 class TaxCalculationResult:
     disposals: list[DisposalResult]
     open_lots: list[AssetLot]
+    income_events: list[IncomeResult] | None = None
 
     @property
     def total_gain_eur(self) -> Decimal:
         return sum((item.gain_eur for item in self.disposals), Decimal("0"))
 
+    @property
+    def total_income_eur(self) -> Decimal:
+        return sum((item.income_eur for item in self.income_events or []), Decimal("0"))
+
 
 class TaxEngine:
-    """Build FIFO lots and disposal results from normalized transactions."""
+    """Build FIFO lots, disposal results, and taxable income events."""
 
     def __init__(
         self,
@@ -56,18 +75,23 @@ class TaxEngine:
 
     def calculate(self, transactions: list[NormalizedTransaction]) -> TaxCalculationResult:
         disposals: list[DisposalResult] = []
+        income_events: list[IncomeResult] = []
         for tx in sorted(transactions, key=lambda item: item.timestamp):
             rule = self.rule_classifier.classify(tx)
             if rule.action == "income_lot":
-                self._add_income_lot(tx)
+                income_events.append(self._add_income_lot(tx))
             elif rule.action == "acquisition_lot":
                 self._add_buy_lot(tx)
             elif rule.action == "disposal":
                 disposals.append(self._create_disposal(tx))
 
-        return TaxCalculationResult(disposals=disposals, open_lots=list(self.fifo.open_lots()))
+        return TaxCalculationResult(
+            disposals=disposals,
+            open_lots=list(self.fifo.open_lots()),
+            income_events=income_events,
+        )
 
-    def _add_income_lot(self, tx: NormalizedTransaction) -> None:
+    def _add_income_lot(self, tx: NormalizedTransaction) -> IncomeResult:
         price = self.price_service.get_price(tx.asset, "EUR", tx.timestamp)
         cost_basis = tx.quantity * price.price
         self.fifo.add_lot(
@@ -79,6 +103,18 @@ class TaxEngine:
                 cost_basis_eur=cost_basis,
                 source_transaction_id=tx.id,
             )
+        )
+        return IncomeResult(
+            transaction_id=tx.id,
+            asset=tx.asset,
+            quantity=tx.quantity,
+            income_eur=cost_basis,
+            received_at=tx.timestamp,
+            product=tx.product,
+            raw_type=tx.raw_type,
+            price_eur=price.price,
+            price_provider=price.provider,
+            price_pair=price.pair,
         )
 
     def _add_buy_lot(self, tx: NormalizedTransaction) -> None:
