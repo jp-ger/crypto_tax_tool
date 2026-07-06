@@ -47,8 +47,6 @@ def _append_if_valid(records: list[NormalizedTransaction], tx: NormalizedTransac
 
 
 class BinanceClient(ExchangeClient):
-    """Binance REST client with product-specific synchronization loaders."""
-
     base_url = "https://api.binance.com"
 
     def __init__(self, progress_callback: Callable[[str], None] | None = None) -> None:
@@ -90,32 +88,26 @@ class BinanceClient(ExchangeClient):
         start = self._effective_sync_start(start)
         self._log(f"Binance transaction sync range: {start.isoformat()} to {end.isoformat()}")
         records: list[NormalizedTransaction] = []
-
         self._log("Syncing deposits and withdrawals first to identify involved assets...")
         transfer_records = self.sync_transfers(start, end)
         records.extend(transfer_records)
         self._log(f"Deposits and withdrawals synced: {len(transfer_records)} rows.")
-
         self._log("Syncing convert trades...")
         convert_records = self.sync_convert_trades(start, end)
         records.extend(convert_records)
         self._log(f"Convert trades synced: {len(convert_records)} rows.")
-
         self._log("Syncing asset rewards/dividends...")
         asset_reward_records = self.sync_asset_rewards(start, end)
         records.extend(asset_reward_records)
         self._log(f"Asset rewards/dividends synced: {len(asset_reward_records)} rows.")
-
         self._log("Syncing Simple Earn rewards...")
         simple_earn_records = self.sync_simple_earn_rewards(start, end)
         records.extend(simple_earn_records)
         self._log(f"Simple Earn rewards synced: {len(simple_earn_records)} rows.")
-
         self._log("Syncing spot trades...")
         spot_records = self.sync_spot_trades(start, end)
         records.extend(spot_records)
         self._log(f"Spot trades synced: {len(spot_records)} rows.")
-
         self._log(f"All Binance transaction loaders completed. Total rows: {len(records)}.")
         return records
 
@@ -126,12 +118,10 @@ class BinanceClient(ExchangeClient):
                 f"Start date {requested_start.date()} is before Binance spot history. "
                 f"Using {BINANCE_SPOT_HISTORY_START.date()} for API sync."
             )
-
         last_sync_end = get_sync_state(LAST_SYNC_END_KEY)
         if not last_sync_end:
             self._log("No previous sync state found. Running initial sync for selected range.")
             return start
-
         try:
             last_end = datetime.fromisoformat(last_sync_end)
             if last_end.tzinfo is not None:
@@ -139,7 +129,6 @@ class BinanceClient(ExchangeClient):
         except ValueError:
             self._log("Previous sync state could not be parsed. Running selected range.")
             return start
-
         incremental_start = max(start, last_end - INCREMENTAL_OVERLAP)
         if incremental_start > start:
             self._log(
@@ -155,7 +144,6 @@ class BinanceClient(ExchangeClient):
         all_symbols = [item for item in self.get_exchange_symbols() if item.status == "TRADING"]
         symbol_by_name = {item.symbol: item for item in all_symbols}
         traded_symbols = self._load_cached_traded_symbols(symbol_by_name)
-
         if traded_symbols:
             self._log(
                 f"Using cached spot symbol list with {len(traded_symbols)} traded symbols. "
@@ -168,24 +156,14 @@ class BinanceClient(ExchangeClient):
             )
             traded_symbols = self._detect_traded_symbols(all_symbols)
             self._save_cached_traded_symbols(traded_symbols)
-
         if not traded_symbols:
             self._log("No account spot trade symbols detected.")
             return records
-
-        if get_sync_state(SPOT_MONTHLY_UNSUPPORTED_KEY):
-            windows = split_into_daily_windows(start, end)
-            self._log(
-                f"Importing spot trades for {len(traded_symbols)} symbols over {len(windows)} daily windows "
-                "because Binance rejected larger spot trade windows earlier."
-            )
-        else:
-            windows = split_into_monthly_windows(start, end)
-            self._log(
-                f"Importing spot trades for {len(traded_symbols)} symbols over {len(windows)} monthly windows. "
-                "If Binance rejects monthly windows, the tool falls back to daily windows automatically."
-            )
-
+        windows = split_into_monthly_windows(start, end)
+        self._log(
+            f"Importing spot trades for {len(traded_symbols)} symbols. "
+            "Each symbol starts with the full selected range; rejected/large ranges are split recursively."
+        )
         for index, item in enumerate(traded_symbols, start=1):
             self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
             symbol_records = self.get_spot_trades(item, start, end, windows=windows)
@@ -230,10 +208,7 @@ class BinanceClient(ExchangeClient):
         return traded_symbols
 
     def _symbol_has_any_trades(self, symbol: BinanceSymbol) -> bool:
-        rows = self._signed_get(
-            "/api/v3/myTrades",
-            {"symbol": symbol.symbol, "limit": 1},
-        )
+        rows = self._signed_get("/api/v3/myTrades", {"symbol": symbol.symbol, "limit": 1})
         return isinstance(rows, list) and len(rows) > 0
 
     def get_spot_trades(
@@ -248,78 +223,73 @@ class BinanceClient(ExchangeClient):
         started = time.monotonic()
         skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
-            cache_key = self._empty_window_key("spot", symbol.symbol, window.start, window.end)
-            if get_sync_state(cache_key):
-                skipped_cached += 1
-                continue
             if window_index == 1 or window_index % 10 == 0 or window_index == len(windows):
                 elapsed = max(time.monotonic() - started, 0.1)
                 per_window = elapsed / window_index
                 remaining = int(per_window * (len(windows) - window_index))
-                window_label = "daily" if self._is_daily_window(window.start, window.end) else "monthly"
                 self._log(
-                    f"{symbol.symbol}: {window_label} window {window_index}/{len(windows)} | "
+                    f"{symbol.symbol}: range window {window_index}/{len(windows)} | "
                     f"estimated remaining for symbol: {remaining}s"
                 )
-
-            rows = self._request_spot_window(symbol, window.start, window.end)
-            if rows is None:
-                self._log(
-                    f"{symbol.symbol}: Binance rejected a larger spot window. "
-                    "Caching daily fallback for future syncs."
-                )
-                set_sync_state(SPOT_MONTHLY_UNSUPPORTED_KEY, "1")
-                records.extend(self._get_spot_trades_daily(symbol, window.start, window.end))
-                continue
-            if not rows:
-                set_sync_state(cache_key, "1")
-                continue
-            if len(rows) >= 1000 and not self._is_daily_window(window.start, window.end):
-                self._log(
-                    f"{symbol.symbol}: larger window returned 1000 rows. "
-                    "Falling back to daily windows to avoid missing trades."
-                )
-                records.extend(self._get_spot_trades_daily(symbol, window.start, window.end))
-                continue
-            records.extend(self._normalize_spot_rows(symbol, rows))
-            self._update_symbol_trade_range(symbol.symbol, rows)
-            self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in current window.")
+            window_records, skipped = self._get_spot_trades_recursive(symbol, window.start, window.end)
+            records.extend(window_records)
+            skipped_cached += skipped
         if skipped_cached:
-            self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty windows.")
+            self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty spot windows.")
         return records
 
+    def _get_spot_trades_recursive(
+        self,
+        symbol: BinanceSymbol,
+        start: datetime,
+        end: datetime,
+        depth: int = 0,
+    ) -> tuple[list[NormalizedTransaction], int]:
+        cache_key = self._empty_window_key("spot", symbol.symbol, start, end)
+        if get_sync_state(cache_key):
+            return [], 1
+        rows = self._request_spot_window(symbol, start, end)
+        if rows is None:
+            if self._is_daily_window(start, end):
+                self._log(f"{symbol.symbol}: rejected daily spot window {start.date()} to {end.date()}.")
+                return [], 0
+            self._log(f"{symbol.symbol}: rejected {self._window_days(start, end)}d spot range; splitting.")
+            return self._split_spot_range(symbol, start, end, depth)
+        if not rows:
+            set_sync_state(cache_key, "1")
+            return [], 0
+        if len(rows) >= 1000 and not self._is_daily_window(start, end):
+            self._log(f"{symbol.symbol}: {self._window_days(start, end)}d spot range hit 1000 rows; splitting.")
+            return self._split_spot_range(symbol, start, end, depth)
+        if len(rows) >= 1000:
+            self._log(f"WARNING {symbol.symbol}: one daily spot window returned 1000 rows; Binance may have more rows.")
+        self._update_symbol_trade_range(symbol.symbol, rows)
+        self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in spot range.")
+        return self._normalize_spot_rows(symbol, rows), 0
+
+    def _split_spot_range(
+        self,
+        symbol: BinanceSymbol,
+        start: datetime,
+        end: datetime,
+        depth: int,
+    ) -> tuple[list[NormalizedTransaction], int]:
+        midpoint = start + ((end - start) / 2)
+        if midpoint <= start or midpoint >= end:
+            return [], 0
+        left_records, left_skipped = self._get_spot_trades_recursive(symbol, start, midpoint, depth + 1)
+        right_records, right_skipped = self._get_spot_trades_recursive(symbol, midpoint, end, depth + 1)
+        return left_records + right_records, left_skipped + right_skipped
+
     def _get_spot_trades_daily(self, symbol: BinanceSymbol, start: datetime, end: datetime) -> list[NormalizedTransaction]:
-        records: list[NormalizedTransaction] = []
-        daily_windows = split_into_daily_windows(start, end)
-        skipped_cached = 0
-        for day_index, day_window in enumerate(daily_windows, start=1):
-            cache_key = self._empty_window_key("spot", symbol.symbol, day_window.start, day_window.end)
-            if get_sync_state(cache_key):
-                skipped_cached += 1
-                continue
-            if day_index == 1 or day_index % 30 == 0 or day_index == len(daily_windows):
-                self._log(f"{symbol.symbol}: daily fallback window {day_index}/{len(daily_windows)}")
-            rows = self._request_spot_window(symbol, day_window.start, day_window.end)
-            if not rows:
-                set_sync_state(cache_key, "1")
-                continue
-            records.extend(self._normalize_spot_rows(symbol, rows))
-            self._update_symbol_trade_range(symbol.symbol, rows)
-            self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in daily fallback window.")
-        if skipped_cached:
-            self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty daily fallback windows.")
+        records, _ = self._get_spot_trades_recursive(symbol, start, end)
         return records
 
     def _request_spot_window(self, symbol: BinanceSymbol, start: datetime, end: datetime) -> list[dict] | None:
         try:
             rows = self._signed_get(
                 "/api/v3/myTrades",
-                {
-                    "symbol": symbol.symbol,
-                    "startTime": _to_millis(start),
-                    "endTime": _to_millis(end),
-                    "limit": 1000,
-                },
+                {"symbol": symbol.symbol, "startTime": _to_millis(start), "endTime": _to_millis(end), "limit": 1000},
             )
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 400 and not self._is_daily_window(start, end):
@@ -354,6 +324,9 @@ class BinanceClient(ExchangeClient):
     def _is_daily_window(self, start: datetime, end: datetime) -> bool:
         return (end - start) <= timedelta(days=1, seconds=1)
 
+    def _window_days(self, start: datetime, end: datetime) -> float:
+        return round((end - start).total_seconds() / 86400, 2)
+
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
         windows = split_into_daily_windows(start, end)
@@ -368,12 +341,7 @@ class BinanceClient(ExchangeClient):
             rows = paginate_numbered(
                 lambda page: self._signed_get(
                     "/sapi/v1/convert/tradeFlow",
-                    {
-                        "startTime": _to_millis(window.start),
-                        "endTime": _to_millis(window.end),
-                        "limit": 1000,
-                        "current": page,
-                    },
+                    {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "limit": 1000, "current": page},
                 ),
                 rows_key="list",
                 page_size=1000,
@@ -401,12 +369,7 @@ class BinanceClient(ExchangeClient):
             rows = paginate_numbered(
                 lambda page: self._signed_get(
                     "/sapi/v1/asset/assetDividend",
-                    {
-                        "startTime": _to_millis(window.start),
-                        "endTime": _to_millis(window.end),
-                        "limit": 500,
-                        "current": page,
-                    },
+                    {"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "limit": 500, "current": page},
                 ),
                 rows_key="rows",
                 page_size=500,
@@ -445,11 +408,7 @@ class BinanceClient(ExchangeClient):
                     path=path,
                     rows_key="rows",
                     page_size=100,
-                    params={
-                        "startTime": _to_millis(window.start),
-                        "endTime": _to_millis(window.end),
-                        "size": 100,
-                    },
+                    params={"startTime": _to_millis(window.start), "endTime": _to_millis(window.end), "size": 100},
                     product=product,
                 )
                 if rows is None:
@@ -472,7 +431,6 @@ class BinanceClient(ExchangeClient):
         for window_index, window in enumerate(windows, start=1):
             if window_index == 1 or window_index % 30 == 0 or window_index == len(windows):
                 self._log(f"Transfer progress: window {window_index}/{len(windows)}")
-
             deposit_key = self._empty_window_key("transfer", "deposit", window.start, window.end)
             if get_sync_state(deposit_key):
                 skipped_cached += 1
@@ -486,7 +444,6 @@ class BinanceClient(ExchangeClient):
                     set_sync_state(deposit_key, "1")
                 for row in deposit_rows:
                     _append_if_valid(records, normalize_transfer(row, "deposit", "deposit", True))
-
             withdrawal_key = self._empty_window_key("transfer", "withdrawal", window.start, window.end)
             if get_sync_state(withdrawal_key):
                 skipped_cached += 1
