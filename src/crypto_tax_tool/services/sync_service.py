@@ -24,7 +24,7 @@ class SyncService:
         if self.progress_callback:
             self.progress_callback(message)
 
-    def sync(self, start: datetime, end: datetime) -> SyncResult:
+    def sync(self, start: datetime, end: datetime, full_resync: bool = False) -> SyncResult:
         self._log("Creating database backup before sync...")
         backup = BackupService().create_backup("before_sync")
         if backup.path:
@@ -32,10 +32,17 @@ class SyncService:
         else:
             self._log("No backup was created before sync.")
 
+        if full_resync:
+            self._log(
+                "Full resync enabled. The selected start date will be used directly; "
+                "incremental last_sync_end will be ignored for this run."
+            )
+            setattr(self.exchange_client, "force_full_resync", True)
+
         if self._supports_staged_sync():
-            loaded, inserted = self._sync_and_save_staged(start=start, end=end)
+            loaded, inserted = self._sync_and_save_staged(start=start, end=end, full_resync=full_resync)
         else:
-            loaded, inserted = self._sync_and_save_all_at_once(start=start, end=end)
+            loaded, inserted = self._sync_and_save_all_at_once(start=start, end=end, full_resync=full_resync)
 
         balance_rows = 0
         if hasattr(self.exchange_client, "get_account_snapshot"):
@@ -64,9 +71,9 @@ class SyncService:
         ]
         return all(hasattr(self.exchange_client, method) for method in required_methods)
 
-    def _sync_and_save_staged(self, start: datetime, end: datetime) -> tuple[int, int]:
+    def _sync_and_save_staged(self, start: datetime, end: datetime, full_resync: bool = False) -> tuple[int, int]:
         effective_start = start
-        if hasattr(self.exchange_client, "_effective_sync_start"):
+        if not full_resync and hasattr(self.exchange_client, "_effective_sync_start"):
             effective_start = self.exchange_client._effective_sync_start(start)  # noqa: SLF001
 
         self._log(f"Staged sync range: {effective_start.isoformat()} to {end.isoformat()}")
@@ -92,8 +99,10 @@ class SyncService:
             )
         return total_loaded, total_inserted
 
-    def _sync_and_save_all_at_once(self, start: datetime, end: datetime) -> tuple[int, int]:
+    def _sync_and_save_all_at_once(self, start: datetime, end: datetime, full_resync: bool = False) -> tuple[int, int]:
         self._log("Loading transactions from exchange...")
+        if full_resync:
+            self._log("Full resync selected range is being loaded from exchange.")
         raw_rows = self.exchange_client.sync_transactions(start=start, end=end)
         rows = self._filter_rows(raw_rows, stage_name="full sync")
         self._log(f"Loaded {len(rows)} transaction rows from exchange.")
