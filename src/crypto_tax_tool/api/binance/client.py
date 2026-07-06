@@ -37,6 +37,7 @@ SPOT_MAX_ACCEPTED_WINDOW_MS_KEY = "binance_spot_max_accepted_window_ms"
 SPOT_INITIAL_PROBE_WINDOW = timedelta(days=90)
 SPOT_MIN_ACCEPTED_WINDOW = timedelta(days=90)
 SPOT_ACTIVITY_OVERLAP = timedelta(days=1)
+PRODUCT_ACTIVITY_OVERLAP = timedelta(days=1)
 SPOT_LIMIT = 1000
 
 
@@ -532,14 +533,19 @@ class BinanceClient(ExchangeClient):
             ("/sapi/v1/simple-earn/flexible/history/rewardsRecord", "simple_earn_flexible"),
             ("/sapi/v1/simple-earn/locked/history/rewardsRecord", "simple_earn_locked"),
         ]
-        windows = split_into_daily_windows(start, end)
         for path, product in endpoints:
             endpoint_key = f"{UNAVAILABLE_ENDPOINT_PREFIX}:{product}"
             if get_sync_state(endpoint_key):
                 self._log(f"Skipping unavailable Simple Earn endpoint cached earlier: {product}")
                 continue
+            bounded = self._apply_known_product_activity_range(product, start, end)
+            if bounded is None:
+                continue
+            bounded_start, bounded_end = bounded
+            windows = split_into_daily_windows(bounded_start, bounded_end)
             self._log(f"Simple Earn endpoint: {product}")
             skipped_cached = 0
+            product_records: list[NormalizedTransaction] = []
             for window_index, window in enumerate(windows, start=1):
                 cache_key = self._empty_window_key("simple_earn", product, window.start, window.end)
                 if get_sync_state(cache_key):
@@ -562,10 +568,69 @@ class BinanceClient(ExchangeClient):
                     set_sync_state(cache_key, "1")
                     continue
                 for row in rows:
-                    _append_if_valid(records, normalize_reward(row, product=product, id_prefix=product))
+                    tx = normalize_reward(row, product=product, id_prefix=product)
+                    if isinstance(tx, NormalizedTransaction):
+                        product_records.append(tx)
+            if product_records:
+                self._update_product_activity_range(product, product_records)
+                records.extend(product_records)
             if skipped_cached:
                 self._log(f"{product}: skipped {skipped_cached} cached empty windows.")
         return records
+
+    def _apply_known_product_activity_range(
+        self, product: str, start: datetime, end: datetime
+    ) -> tuple[datetime, datetime] | None:
+        first_seen = self._load_product_activity_timestamp(product, "first")
+        last_seen = self._load_product_activity_timestamp(product, "last")
+        bounded_start = start
+        bounded_end = end
+        if first_seen is not None:
+            first_start = first_seen - PRODUCT_ACTIVITY_OVERLAP
+            if end < first_start:
+                self._log(f"{product}: selected range ends before known first activity; skipping.")
+                return None
+            if start < first_start:
+                bounded_start = first_start
+        if last_seen is not None:
+            last_end = last_seen + PRODUCT_ACTIVITY_OVERLAP
+            if end <= last_end and start <= last_end:
+                bounded_end = min(end, last_end)
+            elif start > last_end:
+                bounded_start = start
+                bounded_end = end
+        if bounded_start != start or bounded_end != end:
+            self._log(
+                f"{product}: using known activity range {bounded_start.date()} to {bounded_end.date()} "
+                f"instead of {start.date()} to {end.date()}."
+            )
+        if bounded_start >= bounded_end:
+            return None
+        return bounded_start, bounded_end
+
+    def _load_product_activity_timestamp(self, product: str, side: str) -> datetime | None:
+        raw = get_sync_state(f"binance_product_{side}_activity:{product}")
+        if not raw:
+            return None
+        try:
+            return _from_millis(int(raw))
+        except ValueError:
+            return None
+
+    def _update_product_activity_range(self, product: str, rows: list[NormalizedTransaction]) -> None:
+        timestamps = [_to_millis(row.timestamp) for row in rows]
+        if not timestamps:
+            return
+        first_key = f"binance_product_first_activity:{product}"
+        last_key = f"binance_product_last_activity:{product}"
+        existing_first = get_sync_state(first_key)
+        existing_last = get_sync_state(last_key)
+        first_seen = min(timestamps)
+        last_seen = max(timestamps)
+        if not existing_first or first_seen < int(existing_first):
+            set_sync_state(first_key, str(first_seen))
+        if not existing_last or last_seen > int(existing_last):
+            set_sync_state(last_key, str(last_seen))
 
     def sync_transfers(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
