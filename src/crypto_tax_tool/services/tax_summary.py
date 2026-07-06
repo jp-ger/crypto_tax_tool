@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from crypto_tax_tool.services.tax_engine import TaxCalculationResult, DisposalResult
+from crypto_tax_tool.services.tax_engine import DisposalResult, IncomeResult, TaxCalculationResult
 
 
 @dataclass(frozen=True)
@@ -18,18 +18,37 @@ class DisposalSummaryRow:
 
 
 @dataclass(frozen=True)
+class IncomeSummaryRow:
+    transaction_id: str
+    asset: str
+    quantity: Decimal
+    income_eur: Decimal
+    received_at: str
+    product: str | None
+    raw_type: str | None
+    price_eur: Decimal
+    price_provider: str
+    price_pair: str | None
+
+
+@dataclass(frozen=True)
 class TaxSummary:
     rows: list[DisposalSummaryRow]
     taxable_gain_eur: Decimal
     long_held_gain_eur: Decimal
     total_gain_eur: Decimal
+    income_rows: list[IncomeSummaryRow]
+    taxable_income_eur: Decimal
+    total_taxable_eur: Decimal
 
 
 class TaxSummaryService:
     def build_summary(self, result: TaxCalculationResult) -> TaxSummary:
         rows: list[DisposalSummaryRow] = []
+        income_rows: list[IncomeSummaryRow] = []
         taxable_gain = Decimal("0")
         long_held_gain = Decimal("0")
+        taxable_income = Decimal("0")
 
         for disposal in result.disposals:
             row = self._build_row(disposal)
@@ -39,11 +58,19 @@ class TaxSummaryService:
             else:
                 taxable_gain += row.gain_eur
 
+        for income in result.income_events or []:
+            income_row = self._build_income_row(income)
+            income_rows.append(income_row)
+            taxable_income += income_row.income_eur
+
         return TaxSummary(
             rows=rows,
             taxable_gain_eur=taxable_gain,
             long_held_gain_eur=long_held_gain,
             total_gain_eur=taxable_gain + long_held_gain,
+            income_rows=income_rows,
+            taxable_income_eur=taxable_income,
+            total_taxable_eur=taxable_gain + taxable_income,
         )
 
     def _build_row(self, disposal: DisposalResult) -> DisposalSummaryRow:
@@ -67,4 +94,18 @@ class TaxSummaryService:
             holding_days_min=min_days,
             holding_days_max=max_days,
             classification=classification,
+        )
+
+    def _build_income_row(self, income: IncomeResult) -> IncomeSummaryRow:
+        return IncomeSummaryRow(
+            transaction_id=income.transaction_id,
+            asset=income.asset,
+            quantity=income.quantity,
+            income_eur=income.income_eur,
+            received_at=income.received_at.isoformat(),
+            product=income.product,
+            raw_type=income.raw_type,
+            price_eur=income.price_eur,
+            price_provider=income.price_provider,
+            price_pair=income.price_pair,
         )
