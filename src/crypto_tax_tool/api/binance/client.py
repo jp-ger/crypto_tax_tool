@@ -165,9 +165,9 @@ class BinanceClient(ExchangeClient):
             self._log("No account spot trade symbols detected.")
             return records
         self._log(
-            f"Importing spot trades for {len(traded_symbols)} symbols with fixed "
-            f"{self._window_days(datetime.min, datetime.min + SPOT_FIXED_WINDOW)}d windows. "
-            "Dynamic recursive splitting is disabled; completed pairs and activity ranges are reused."
+            f"Importing spot trades for {len(traded_symbols)} symbols with latest-trades fast path first. "
+            f"Only symbols with at least {SPOT_LIMIT} latest rows fall back to fixed "
+            f"{self._window_days(datetime.min, datetime.min + SPOT_FIXED_WINDOW)}d windows."
         )
         for index, item in enumerate(traded_symbols, start=1):
             self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
@@ -236,6 +236,11 @@ class BinanceClient(ExchangeClient):
                     f"resuming with overlap at {resume_start.date()}."
                 )
                 start = resume_start
+        if windows is None and not self._has_known_symbol_activity_range(symbol.symbol):
+            fast_path_records = self._try_spot_latest_trades_fast_path(symbol)
+            if fast_path_records is not None:
+                self._mark_spot_symbol_completed(symbol.symbol, start, end)
+                return fast_path_records
         bounded = self._apply_known_symbol_activity_range(symbol.symbol, start, end)
         if bounded is None:
             self._mark_spot_symbol_completed(symbol.symbol, start, end)
@@ -264,6 +269,37 @@ class BinanceClient(ExchangeClient):
             self._log(f"WARNING {symbol.symbol}: skipped {rejected_windows} rejected fixed spot windows.")
         self._mark_spot_symbol_completed(symbol.symbol, start, end)
         return records
+
+    def _try_spot_latest_trades_fast_path(self, symbol: BinanceSymbol) -> list[NormalizedTransaction] | None:
+        rows = self._request_spot_latest_trades(symbol)
+        if rows is None:
+            return None
+        if len(rows) >= SPOT_LIMIT:
+            self._log(
+                f"{symbol.symbol}: latest-trades probe returned {len(rows)} rows; "
+                "falling back to fixed windows because older trades may exist."
+            )
+            return None
+        if not rows:
+            self._log(f"{symbol.symbol}: latest-trades probe returned no rows; marking pair complete.")
+            return []
+        self._update_symbol_trade_range(symbol.symbol, rows)
+        self._log(
+            f"{symbol.symbol}: latest-trades fast path loaded all {len(rows)} raw spot rows "
+            f"with one API call."
+        )
+        return self._normalize_spot_rows(symbol, rows)
+
+    def _request_spot_latest_trades(self, symbol: BinanceSymbol) -> list[dict] | None:
+        try:
+            rows = self._signed_get("/api/v3/myTrades", {"symbol": symbol.symbol, "limit": SPOT_LIMIT})
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 400:
+                return None
+            raise
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
 
     def _get_spot_trades_fixed_window(
         self, symbol: BinanceSymbol, start: datetime, end: datetime
@@ -308,6 +344,13 @@ class BinanceClient(ExchangeClient):
         if current is None or completed_date > current:
             set_sync_state(key, completed_date.isoformat())
             self._log(f"{symbol}: cached completed spot range through {completed_date.isoformat()}.")
+
+    def _has_known_symbol_activity_range(self, symbol: str) -> bool:
+        if get_sync_state(f"binance_spot_symbol_first_trade:{symbol}") and get_sync_state(
+            f"binance_spot_symbol_last_trade:{symbol}"
+        ):
+            return True
+        return get_local_spot_symbol_range(symbol) is not None
 
     def _apply_known_symbol_activity_range(
         self, symbol: str, start: datetime, end: datetime
