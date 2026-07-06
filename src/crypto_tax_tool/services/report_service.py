@@ -46,6 +46,7 @@ class ReportGenerationService:
         output_dir: Path | None = None,
         report_start: datetime | None = None,
         report_end: datetime | None = None,
+        number_format: str = "international",
     ) -> ReportGenerationResult:
         validation_report = ValidationService().validate()
         if not validation_report.can_create_report:
@@ -65,10 +66,17 @@ class ReportGenerationService:
         summary = TaxSummaryService().build_summary(calculation)
         audit_records = AuditTrailService().build_report_audit(calculation)
 
-        summary_csv = CsvTaxReportExporter().export(summary, output_dir / "tax_summary.csv")
-        income_csv = CsvIncomeReportExporter().export(summary, output_dir / "taxable_income.csv")
+        summary_csv = CsvTaxReportExporter().export(
+            summary, output_dir / "tax_summary.csv", number_format=number_format
+        )
+        income_csv = CsvIncomeReportExporter().export(
+            summary, output_dir / "taxable_income.csv", number_format=number_format
+        )
         summary_xlsx = ExcelTaxReportExporter().export(
-            summary, output_dir / "tax_report.xlsx", calculation.open_lots
+            summary,
+            output_dir / "tax_report.xlsx",
+            calculation.open_lots,
+            number_format=number_format,
         )
         audit_csv = AuditCsvExporter().export(audit_records, output_dir / "audit_trail.csv")
 
