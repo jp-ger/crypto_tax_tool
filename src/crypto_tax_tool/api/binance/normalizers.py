@@ -9,6 +9,24 @@ from crypto_tax_tool.models.transactions import NormalizedTransaction
 def _dt_from_ms(value: int | str | None) -> datetime:
     if value is None or value == "":
         raise ValueError("Missing timestamp in Binance payload.")
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError("Missing timestamp in Binance payload.")
+        if text.isdigit():
+            return datetime.fromtimestamp(int(text) / 1000, tz=UTC)
+        # Some Binance history endpoints return timestamps as strings like
+        # "2024-04-26 06:42:24" instead of Unix milliseconds.
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
     return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
 
 
