@@ -17,7 +17,7 @@ from crypto_tax_tool.api.binance.normalizers import (
     normalize_transfer,
 )
 from crypto_tax_tool.api.binance.pagination import extract_rows, paginate_numbered
-from crypto_tax_tool.api.binance.spot_sync import split_into_daily_windows, split_into_monthly_windows
+from crypto_tax_tool.api.binance.spot_sync import TimeWindow, split_into_daily_windows, split_into_monthly_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
 from crypto_tax_tool.database.sqlite_store import get_sync_state, set_sync_state
@@ -33,6 +33,7 @@ INCREMENTAL_OVERLAP = timedelta(days=1)
 EMPTY_WINDOW_PREFIX = "binance_empty_window"
 UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
 SPOT_MONTHLY_UNSUPPORTED_KEY = "binance_spot_monthly_windows_unsupported"
+SPOT_MAX_ACCEPTED_WINDOW_MS_KEY = "binance_spot_max_accepted_window_ms"
 
 
 def _to_millis(value: datetime) -> int:
@@ -159,14 +160,21 @@ class BinanceClient(ExchangeClient):
         if not traded_symbols:
             self._log("No account spot trade symbols detected.")
             return records
-        windows = split_into_monthly_windows(start, end)
-        self._log(
-            f"Importing spot trades for {len(traded_symbols)} symbols. "
-            "Each symbol starts with the full selected range; rejected/large ranges are split recursively."
-        )
+        cached_window_ms = self._load_spot_max_accepted_window_ms()
+        if cached_window_ms:
+            self._log(
+                f"Importing spot trades for {len(traded_symbols)} symbols with cached Binance max "
+                f"spot range of about {self._millis_to_days(cached_window_ms)}d. "
+                "Ranges are split only when a window returns 1000 rows."
+            )
+        else:
+            self._log(
+                f"Importing spot trades for {len(traded_symbols)} symbols. "
+                "The first accepted Binance spot range is cached and reused for later symbols."
+            )
         for index, item in enumerate(traded_symbols, start=1):
             self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
-            symbol_records = self.get_spot_trades(item, start, end, windows=windows)
+            symbol_records = self.get_spot_trades(item, start, end)
             self._log(f"Imported {len(symbol_records)} spot trade rows for {item.symbol}.")
             records.extend(symbol_records)
         return records
@@ -216,10 +224,10 @@ class BinanceClient(ExchangeClient):
         symbol: BinanceSymbol,
         start: datetime,
         end: datetime,
-        windows: list | None = None,
+        windows: list[TimeWindow] | None = None,
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        windows = windows or split_into_monthly_windows(start, end)
+        windows = windows or self._split_by_cached_spot_window(start, end)
         started = time.monotonic()
         skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
@@ -250,11 +258,13 @@ class BinanceClient(ExchangeClient):
             return [], 1
         rows = self._request_spot_window(symbol, start, end)
         if rows is None:
+            self._record_rejected_spot_window(start, end)
             if self._is_daily_window(start, end):
                 self._log(f"{symbol.symbol}: rejected daily spot window {start.date()} to {end.date()}.")
                 return [], 0
-            self._log(f"{symbol.symbol}: rejected {self._window_days(start, end)}d spot range; splitting.")
+            self._log(f"{symbol.symbol}: rejected {self._window_days(start, end)}d spot range; splitting for discovery.")
             return self._split_spot_range(symbol, start, end, depth)
+        self._remember_spot_accepted_window(start, end)
         if not rows:
             set_sync_state(cache_key, "1")
             return [], 0
@@ -321,11 +331,54 @@ class BinanceClient(ExchangeClient):
         if not existing_last or last_seen > int(existing_last):
             set_sync_state(last_key, str(last_seen))
 
+    def _split_by_cached_spot_window(self, start: datetime, end: datetime) -> list[TimeWindow]:
+        max_window_ms = self._load_spot_max_accepted_window_ms()
+        if not max_window_ms:
+            return split_into_monthly_windows(start, end)
+        windows: list[TimeWindow] = []
+        current = start
+        step = timedelta(milliseconds=max_window_ms)
+        while current < end:
+            stop = min(current + step, end)
+            windows.append(TimeWindow(start=current, end=stop))
+            current = stop
+        return windows
+
+    def _load_spot_max_accepted_window_ms(self) -> int | None:
+        raw = get_sync_state(SPOT_MAX_ACCEPTED_WINDOW_MS_KEY)
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    def _remember_spot_accepted_window(self, start: datetime, end: datetime) -> None:
+        window_ms = _to_millis(end) - _to_millis(start)
+        if window_ms <= 0:
+            return
+        current = self._load_spot_max_accepted_window_ms()
+        if current is None or window_ms > current:
+            set_sync_state(SPOT_MAX_ACCEPTED_WINDOW_MS_KEY, str(window_ms))
+            self._log(f"Cached Binance accepted spot range: about {self._millis_to_days(window_ms)}d.")
+
+    def _record_rejected_spot_window(self, start: datetime, end: datetime) -> None:
+        rejected_ms = _to_millis(end) - _to_millis(start)
+        current = self._load_spot_max_accepted_window_ms()
+        if current is not None and rejected_ms <= current:
+            reduced = max(rejected_ms // 2, int(timedelta(days=1).total_seconds() * 1000))
+            set_sync_state(SPOT_MAX_ACCEPTED_WINDOW_MS_KEY, str(reduced))
+            self._log(f"Reduced cached Binance spot range to about {self._millis_to_days(reduced)}d after rejection.")
+
     def _is_daily_window(self, start: datetime, end: datetime) -> bool:
         return (end - start) <= timedelta(days=1, seconds=1)
 
     def _window_days(self, start: datetime, end: datetime) -> float:
         return round((end - start).total_seconds() / 86400, 2)
+
+    def _millis_to_days(self, value: int) -> float:
+        return round(value / 86_400_000, 2)
 
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
