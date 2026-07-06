@@ -14,9 +14,11 @@ class ExcelTaxReportExporter:
         sheet.title = "Tax Summary"
 
         sheet.append(["Metric", "Value"])
-        sheet.append(["Taxable gain EUR", str(summary.taxable_gain_eur)])
-        sheet.append(["Long-held gain EUR", str(summary.long_held_gain_eur)])
-        sheet.append(["Total gain EUR", str(summary.total_gain_eur)])
+        sheet.append(["Taxable disposal gain EUR", str(summary.taxable_gain_eur)])
+        sheet.append(["Long-held disposal gain EUR", str(summary.long_held_gain_eur)])
+        sheet.append(["Total disposal gain EUR", str(summary.total_gain_eur)])
+        sheet.append(["Taxable income EUR", str(summary.taxable_income_eur)])
+        sheet.append(["Total taxable EUR", str(summary.total_taxable_eur)])
 
         details = workbook.create_sheet("Disposals")
         details.append(
@@ -44,6 +46,37 @@ class ExcelTaxReportExporter:
                     row.holding_days_min,
                     row.holding_days_max,
                     row.classification,
+                ]
+            )
+
+        income_sheet = workbook.create_sheet("Taxable Income")
+        income_sheet.append(
+            [
+                "Transaction ID",
+                "Received At",
+                "Asset",
+                "Quantity",
+                "Income EUR",
+                "EUR Price",
+                "Product",
+                "Type",
+                "Price Provider",
+                "Price Pair",
+            ]
+        )
+        for row in summary.income_rows:
+            income_sheet.append(
+                [
+                    row.transaction_id,
+                    row.received_at,
+                    row.asset,
+                    str(row.quantity),
+                    str(row.income_eur),
+                    str(row.price_eur),
+                    row.product,
+                    row.raw_type,
+                    row.price_provider,
+                    row.price_pair,
                 ]
             )
 
