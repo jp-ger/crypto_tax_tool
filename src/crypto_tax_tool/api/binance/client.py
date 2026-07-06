@@ -35,12 +35,17 @@ UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
 SPOT_MONTHLY_UNSUPPORTED_KEY = "binance_spot_monthly_windows_unsupported"
 SPOT_MAX_ACCEPTED_WINDOW_MS_KEY = "binance_spot_max_accepted_window_ms"
 SPOT_INITIAL_PROBE_WINDOW = timedelta(days=90)
+SPOT_ACTIVITY_OVERLAP = timedelta(days=1)
 
 
 def _to_millis(value: datetime) -> int:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return int(value.timestamp() * 1000)
+
+
+def _from_millis(value: int) -> datetime:
+    return datetime.fromtimestamp(value / 1000, tz=UTC).replace(tzinfo=None)
 
 
 def _append_if_valid(records: list[NormalizedTransaction], tx: NormalizedTransaction | None) -> None:
@@ -166,13 +171,13 @@ class BinanceClient(ExchangeClient):
             self._log(
                 f"Importing spot trades for {len(traded_symbols)} symbols with cached Binance max "
                 f"spot range of about {self._millis_to_days(cached_window_ms)}d. "
-                "Ranges are split only when a window returns 1000 rows."
+                "Known symbol activity ranges are used to skip old empty history."
             )
         else:
             self._log(
                 f"Importing spot trades for {len(traded_symbols)} symbols with initial "
                 f"{self._window_days(datetime.min, datetime.min + SPOT_INITIAL_PROBE_WINDOW)}d probe windows. "
-                "The first accepted Binance spot range is cached and reused for later symbols."
+                "The first accepted Binance spot range and known symbol activity ranges are cached."
             )
         for index, item in enumerate(traded_symbols, start=1):
             self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
@@ -229,7 +234,11 @@ class BinanceClient(ExchangeClient):
         windows: list[TimeWindow] | None = None,
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        windows = windows or self._split_by_cached_spot_window(start, end)
+        bounded = self._apply_known_symbol_activity_range(symbol.symbol, start, end)
+        if bounded is None:
+            return records
+        bounded_start, bounded_end = bounded
+        windows = windows or self._split_by_cached_spot_window(bounded_start, bounded_end)
         started = time.monotonic()
         skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
@@ -247,6 +256,46 @@ class BinanceClient(ExchangeClient):
         if skipped_cached:
             self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty spot windows.")
         return records
+
+    def _apply_known_symbol_activity_range(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> tuple[datetime, datetime] | None:
+        first_trade = self._load_symbol_trade_timestamp(symbol, "first")
+        last_trade = self._load_symbol_trade_timestamp(symbol, "last")
+        bounded_start = start
+        bounded_end = end
+        if first_trade is not None:
+            first_start = max(BINANCE_SPOT_HISTORY_START, first_trade - SPOT_ACTIVITY_OVERLAP)
+            if end < first_start:
+                self._log(f"{symbol}: selected range ends before known first spot trade; skipping.")
+                return None
+            if start < first_start:
+                bounded_start = first_start
+        if last_trade is not None:
+            last_end = last_trade + SPOT_ACTIVITY_OVERLAP
+            if end <= last_end and start <= last_end:
+                bounded_end = min(end, last_end)
+            elif start > last_end:
+                # Keep the requested future range open to detect new trades after the cached last trade.
+                bounded_start = start
+                bounded_end = end
+        if bounded_start != start or bounded_end != end:
+            self._log(
+                f"{symbol}: using known activity range {bounded_start.date()} to {bounded_end.date()} "
+                f"instead of {start.date()} to {end.date()}."
+            )
+        if bounded_start >= bounded_end:
+            return None
+        return bounded_start, bounded_end
+
+    def _load_symbol_trade_timestamp(self, symbol: str, side: str) -> datetime | None:
+        raw = get_sync_state(f"binance_spot_symbol_{side}_trade:{symbol}")
+        if not raw:
+            return None
+        try:
+            return _from_millis(int(raw))
+        except ValueError:
+            return None
 
     def _get_spot_trades_recursive(
         self,
