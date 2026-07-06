@@ -2,7 +2,12 @@ from collections.abc import Callable
 from datetime import datetime
 
 from crypto_tax_tool.api.exchange_base import ExchangeClient
-from crypto_tax_tool.database.sqlite_store import save_balance_snapshot, save_transactions, set_sync_state
+from crypto_tax_tool.database.sqlite_store import (
+    get_sync_state,
+    save_balance_snapshot,
+    save_transactions,
+    set_sync_state,
+)
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.services.backup_service import BackupService
 
@@ -36,6 +41,10 @@ class SyncService:
             self._log(
                 "Full resync enabled. The selected start date will be used directly; "
                 "incremental last_sync_end will be ignored for this run."
+            )
+            self._log(
+                "Resume mode enabled. Completed stages for the same selected range will be skipped; "
+                "failed/incomplete stages will be retried."
             )
             setattr(self.exchange_client, "force_full_resync", True)
 
@@ -88,7 +97,21 @@ class SyncService:
         total_loaded = 0
         total_inserted = 0
         failed_stages: list[str] = []
-        for stage_name, sync_function in stages:
+        completed_before_run = 0
+        range_signature = self._range_signature(effective_start, end)
+
+        for index, (stage_name, sync_function) in enumerate(stages, start=1):
+            stage_key = self._stage_completed_key(stage_name, range_signature)
+            overall_pct = int(((index - 1) / len(stages)) * 100)
+            self._log(f"Overall sync progress: {overall_pct}% | stage {index}/{len(stages)}: {stage_name}")
+
+            if full_resync and get_sync_state(stage_key) == "done":
+                completed_before_run += 1
+                self._log(
+                    f"Skipping already completed full-resync stage for this selected range: {stage_name}."
+                )
+                continue
+
             self._log(f"Starting stage: {stage_name}")
             try:
                 raw_rows = sync_function(effective_start, end)
@@ -106,9 +129,14 @@ class SyncService:
             inserted = save_transactions(rows)
             total_loaded += len(rows)
             total_inserted += inserted
+            set_sync_state(stage_key, "done")
             self._log(
                 f"Stage saved: {stage_name}. Loaded: {len(rows)}, inserted new rows: {inserted}."
             )
+
+        self._log("Overall sync progress: 100% | all staged loaders attempted.")
+        if completed_before_run:
+            self._log(f"Resume summary: skipped {completed_before_run} already completed stage(s).")
         if failed_stages:
             self._log(
                 "WARNING sync completed with skipped stages: "
@@ -136,3 +164,12 @@ class SyncService:
         if skipped_rows:
             self._log(f"Skipped {skipped_rows} incomplete rows in stage: {stage_name}.")
         return rows
+
+    @staticmethod
+    def _range_signature(start: datetime, end: datetime) -> str:
+        return f"{start.isoformat()}::{end.isoformat()}"
+
+    @staticmethod
+    def _stage_completed_key(stage_name: str, range_signature: str) -> str:
+        safe_stage = stage_name.lower().replace(" ", "_").replace("/", "_")
+        return f"full_resync_stage_done:{safe_stage}:{range_signature}"
