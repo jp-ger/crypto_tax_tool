@@ -34,6 +34,7 @@ EMPTY_WINDOW_PREFIX = "binance_empty_window"
 UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
 SPOT_MONTHLY_UNSUPPORTED_KEY = "binance_spot_monthly_windows_unsupported"
 SPOT_MAX_ACCEPTED_WINDOW_MS_KEY = "binance_spot_max_accepted_window_ms"
+SPOT_INITIAL_PROBE_WINDOW = timedelta(days=90)
 
 
 def _to_millis(value: datetime) -> int:
@@ -169,7 +170,8 @@ class BinanceClient(ExchangeClient):
             )
         else:
             self._log(
-                f"Importing spot trades for {len(traded_symbols)} symbols. "
+                f"Importing spot trades for {len(traded_symbols)} symbols with initial "
+                f"{self._window_days(datetime.min, datetime.min + SPOT_INITIAL_PROBE_WINDOW)}d probe windows. "
                 "The first accepted Binance spot range is cached and reused for later symbols."
             )
         for index, item in enumerate(traded_symbols, start=1):
@@ -333,11 +335,9 @@ class BinanceClient(ExchangeClient):
 
     def _split_by_cached_spot_window(self, start: datetime, end: datetime) -> list[TimeWindow]:
         max_window_ms = self._load_spot_max_accepted_window_ms()
-        if not max_window_ms:
-            return split_into_monthly_windows(start, end)
+        step = timedelta(milliseconds=max_window_ms) if max_window_ms else SPOT_INITIAL_PROBE_WINDOW
         windows: list[TimeWindow] = []
         current = start
-        step = timedelta(milliseconds=max_window_ms)
         while current < end:
             stop = min(current + step, end)
             windows.append(TimeWindow(start=current, end=stop))
