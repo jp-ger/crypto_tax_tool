@@ -43,8 +43,8 @@ class SyncService:
                 "incremental last_sync_end will be ignored for this run."
             )
             self._log(
-                "Resume mode enabled. Completed stages for the same selected range will be skipped; "
-                "failed/incomplete stages will be retried."
+                "Resume mode enabled. Completed stages for the same selected date range will be skipped; "
+                "failed stages will be retried."
             )
             setattr(self.exchange_client, "force_full_resync", True)
 
@@ -108,7 +108,7 @@ class SyncService:
             if full_resync and get_sync_state(stage_key) == "done":
                 completed_before_run += 1
                 self._log(
-                    f"Skipping already completed full-resync stage for this selected range: {stage_name}."
+                    f"Skipping already completed full-resync stage for this selected date range: {stage_name}."
                 )
                 continue
 
@@ -167,7 +167,7 @@ class SyncService:
 
     @staticmethod
     def _range_signature(start: datetime, end: datetime) -> str:
-        return f"{start.isoformat()}::{end.isoformat()}"
+        return f"{start.date().isoformat()}::{end.date().isoformat()}"
 
     @staticmethod
     def _stage_completed_key(stage_name: str, range_signature: str) -> str:
