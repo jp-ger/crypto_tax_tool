@@ -87,15 +87,33 @@ class SyncService:
 
         total_loaded = 0
         total_inserted = 0
+        failed_stages: list[str] = []
         for stage_name, sync_function in stages:
             self._log(f"Starting stage: {stage_name}")
-            raw_rows = sync_function(effective_start, end)
+            try:
+                raw_rows = sync_function(effective_start, end)
+            except Exception as exc:  # noqa: BLE001
+                failed_stages.append(stage_name)
+                self._log(
+                    f"WARNING stage failed and will be skipped for this run: {stage_name}. "
+                    f"Reason: {type(exc).__name__}: {exc}"
+                )
+                self._log(
+                    "The sync will continue with the next stage. Run the same sync again later to retry this stage."
+                )
+                continue
             rows = self._filter_rows(raw_rows, stage_name=stage_name)
             inserted = save_transactions(rows)
             total_loaded += len(rows)
             total_inserted += inserted
             self._log(
                 f"Stage saved: {stage_name}. Loaded: {len(rows)}, inserted new rows: {inserted}."
+            )
+        if failed_stages:
+            self._log(
+                "WARNING sync completed with skipped stages: "
+                + ", ".join(failed_stages)
+                + ". Existing/new data from successful stages was saved."
             )
         return total_loaded, total_inserted
 
