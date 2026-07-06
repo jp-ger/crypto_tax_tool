@@ -20,7 +20,7 @@ from crypto_tax_tool.api.binance.pagination import extract_rows, paginate_number
 from crypto_tax_tool.api.binance.spot_sync import TimeWindow, split_into_daily_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
-from crypto_tax_tool.database.sqlite_store import get_sync_state, set_sync_state
+from crypto_tax_tool.database.sqlite_store import get_local_spot_symbol_range, get_sync_state, set_sync_state
 from crypto_tax_tool.models.balances import BalanceSnapshot
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.settings import get_settings
@@ -35,8 +35,6 @@ UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
 SPOT_ACTIVITY_OVERLAP = timedelta(days=1)
 PRODUCT_ACTIVITY_OVERLAP = timedelta(days=1)
 SPOT_LIMIT = 1000
-# Binance rejected 1.41d windows in real sync logs, while smaller windows were accepted.
-# Use a conservative fixed 12h window and never recurse/split dynamically.
 SPOT_FIXED_WINDOW = timedelta(hours=12)
 
 
@@ -343,12 +341,22 @@ class BinanceClient(ExchangeClient):
 
     def _load_symbol_trade_timestamp(self, symbol: str, side: str) -> datetime | None:
         raw = get_sync_state(f"binance_spot_symbol_{side}_trade:{symbol}")
-        if not raw:
+        if raw:
+            try:
+                return _from_millis(int(raw))
+            except ValueError:
+                return None
+        local_range = get_local_spot_symbol_range(symbol)
+        if local_range is None:
             return None
-        try:
-            return _from_millis(int(raw))
-        except ValueError:
-            return None
+        first_seen, last_seen = local_range
+        set_sync_state(f"binance_spot_symbol_first_trade:{symbol}", str(_to_millis(first_seen)))
+        set_sync_state(f"binance_spot_symbol_last_trade:{symbol}", str(_to_millis(last_seen)))
+        self._log(
+            f"{symbol}: restored known activity range from local transactions: "
+            f"{first_seen.date()} to {last_seen.date()}."
+        )
+        return first_seen if side == "first" else last_seen
 
     def _request_spot_window(self, symbol: BinanceSymbol, start: datetime, end: datetime) -> list[dict] | None:
         try:
@@ -395,14 +403,8 @@ class BinanceClient(ExchangeClient):
             current = stop
         return windows
 
-    def _is_daily_window(self, start: datetime, end: datetime) -> bool:
-        return (end - start) <= timedelta(days=1, seconds=1)
-
     def _window_days(self, start: datetime, end: datetime) -> float:
         return round((end - start).total_seconds() / 86400, 2)
-
-    def _millis_to_days(self, value: int) -> float:
-        return round(value / 86_400_000, 2)
 
     def sync_convert_trades(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
