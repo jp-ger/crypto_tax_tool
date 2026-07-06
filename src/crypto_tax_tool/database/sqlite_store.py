@@ -105,6 +105,15 @@ CREATE INDEX IF NOT EXISTS idx_fifo_usages_lot ON fifo_usages(lot_id);
 """
 
 
+IGNORED_SYNC_STATE_KEYS = {
+    # Older versions stored this global flag after one rejected large spot window.
+    # That forced every future spot sync for every symbol into thousands of daily
+    # windows. We now ignore the flag so the spot sync starts with larger windows
+    # again and only falls back to daily windows for the specific rejected month.
+    "binance_spot_monthly_windows_unsupported",
+}
+
+
 def get_db_path() -> Path:
     settings = get_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -306,6 +315,8 @@ def set_sync_state(key: str, value: str) -> None:
 
 
 def get_sync_state(key: str) -> str | None:
+    if key in IGNORED_SYNC_STATE_KEYS:
+        return None
     with connect() as conn:
         row = conn.execute("SELECT sync_value FROM sync_state WHERE sync_key = ?", (key,)).fetchone()
         return None if row is None else str(row["sync_value"])
