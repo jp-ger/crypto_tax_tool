@@ -12,20 +12,16 @@ def split_into_daily_windows(start: datetime, end: datetime) -> list[TimeWindow]
     windows: list[TimeWindow] = []
     current = start
     while current < end:
-        window_end = min(current + timedelta(days=1), end)
-        windows.append(TimeWindow(start=current, end=window_end))
-        current = window_end
+        stop = min(current + timedelta(days=1), end)
+        windows.append(TimeWindow(start=current, end=stop))
+        current = stop
     return windows
 
 
 def split_into_monthly_windows(start: datetime, end: datetime) -> list[TimeWindow]:
     windows: list[TimeWindow] = []
-    current = start
-    while current < end:
-        next_month = _add_one_month(current)
-        window_end = min(next_month, end)
-        windows.append(TimeWindow(start=current, end=window_end))
-        current = window_end
+    if start < end:
+        windows.append(TimeWindow(start=start, end=end))
     return windows
 
 
