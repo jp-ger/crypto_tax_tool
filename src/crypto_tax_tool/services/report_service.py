@@ -5,7 +5,7 @@ from pathlib import Path
 from crypto_tax_tool.database.loaders import load_transactions
 from crypto_tax_tool.database.manual_store import load_manual_lots
 from crypto_tax_tool.reports.audit_report import AuditCsvExporter
-from crypto_tax_tool.reports.csv_report import CsvTaxReportExporter
+from crypto_tax_tool.reports.csv_report import CsvIncomeReportExporter, CsvTaxReportExporter
 from crypto_tax_tool.reports.excel_report import ExcelTaxReportExporter
 from crypto_tax_tool.services.audit_service import AuditTrailService
 from crypto_tax_tool.services.backup_service import BackupService
@@ -30,8 +30,10 @@ class ReportGenerationResult:
     summary_csv: Path
     summary_xlsx: Path
     audit_csv: Path
+    income_csv: Path
     transactions: int
     disposals: int
+    income_events: int
     open_lots: int
     validation_report: ValidationReport
     backup_path: Path | None
@@ -64,6 +66,7 @@ class ReportGenerationService:
         audit_records = AuditTrailService().build_report_audit(calculation)
 
         summary_csv = CsvTaxReportExporter().export(summary, output_dir / "tax_summary.csv")
+        income_csv = CsvIncomeReportExporter().export(summary, output_dir / "taxable_income.csv")
         summary_xlsx = ExcelTaxReportExporter().export(
             summary, output_dir / "tax_report.xlsx", calculation.open_lots
         )
@@ -74,8 +77,10 @@ class ReportGenerationService:
             summary_csv=summary_csv,
             summary_xlsx=summary_xlsx,
             audit_csv=audit_csv,
+            income_csv=income_csv,
             transactions=len(transactions),
             disposals=len(calculation.disposals),
+            income_events=len(calculation.income_events or []),
             open_lots=len(calculation.open_lots),
             validation_report=validation_report,
             backup_path=backup.path,
@@ -103,7 +108,22 @@ class ReportGenerationService:
             if report_end is not None and disposed_at > report_end:
                 continue
             disposals.append(disposal)
-        return TaxCalculationResult(disposals=disposals, open_lots=calculation.open_lots)
+        income_events = []
+        for income in calculation.income_events or []:
+            received_at = _as_utc(income.received_at)
+            if received_at is None:
+                income_events.append(income)
+                continue
+            if report_start is not None and received_at < report_start:
+                continue
+            if report_end is not None and received_at > report_end:
+                continue
+            income_events.append(income)
+        return TaxCalculationResult(
+            disposals=disposals,
+            open_lots=calculation.open_lots,
+            income_events=income_events,
+        )
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
