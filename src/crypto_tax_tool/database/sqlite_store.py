@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_transactions_asset ON transactions(asset);
 CREATE INDEX IF NOT EXISTS idx_transactions_kind ON transactions(kind);
+CREATE INDEX IF NOT EXISTS idx_transactions_product ON transactions(product);
+CREATE INDEX IF NOT EXISTS idx_transactions_source_id ON transactions(source_id);
 
 CREATE TABLE IF NOT EXISTS sync_state (
     sync_key TEXT PRIMARY KEY,
@@ -106,10 +108,6 @@ CREATE INDEX IF NOT EXISTS idx_fifo_usages_lot ON fifo_usages(lot_id);
 
 
 IGNORED_SYNC_STATE_KEYS = {
-    # Older versions stored this global flag after one rejected large spot window.
-    # That forced every future spot sync for every symbol into thousands of daily
-    # windows. We now ignore the flag so the spot sync starts with larger windows
-    # again and only falls back to daily windows for the specific rejected month.
     "binance_spot_monthly_windows_unsupported",
 }
 
@@ -320,6 +318,24 @@ def get_sync_state(key: str) -> str | None:
     with connect() as conn:
         row = conn.execute("SELECT sync_value FROM sync_state WHERE sync_key = ?", (key,)).fetchone()
         return None if row is None else str(row["sync_value"])
+
+
+def get_local_spot_symbol_range(symbol: str) -> tuple[datetime, datetime] | None:
+    source_prefix = f"spot:{symbol}:"
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts
+            FROM transactions
+            WHERE source = 'binance'
+              AND product = 'spot'
+              AND source_id LIKE ?
+            """,
+            (f"{source_prefix}%",),
+        ).fetchone()
+    if row is None or row["first_ts"] is None or row["last_ts"] is None:
+        return None
+    return datetime.fromisoformat(row["first_ts"]), datetime.fromisoformat(row["last_ts"])
 
 
 def count_transactions() -> int:
