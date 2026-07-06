@@ -174,13 +174,13 @@ class BinanceClient(ExchangeClient):
             self._log(
                 f"Importing spot trades for {len(traded_symbols)} symbols with cached Binance max "
                 f"spot range of about {self._millis_to_days(cached_window_ms)}d. "
-                "Each symbol is first probed with its full bounded range; cached windows are used only when needed."
+                "Completed pairs and known symbol activity ranges are reused."
             )
         else:
             self._log(
                 f"Importing spot trades for {len(traded_symbols)} symbols with full-range fast probes and "
                 f"{self._window_days(datetime.min, datetime.min + SPOT_INITIAL_PROBE_WINDOW)}d fallback windows. "
-                "The first accepted Binance spot range and known symbol activity ranges are cached."
+                "Completed pairs, accepted ranges and known symbol activity ranges are cached."
             )
         for index, item in enumerate(traded_symbols, start=1):
             self._log(f"Importing spot trades for symbol {index}/{len(traded_symbols)} ({item.symbol})")
@@ -237,13 +237,29 @@ class BinanceClient(ExchangeClient):
         windows: list[TimeWindow] | None = None,
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
+        completed_until = self._load_spot_symbol_completed_until(symbol.symbol, start)
+        if completed_until is not None and completed_until >= end.date():
+            self._log(
+                f"{symbol.symbol}: selected spot range already completed through {completed_until.isoformat()}; skipping."
+            )
+            return records
+        if completed_until is not None:
+            resume_start = datetime.combine(completed_until, datetime.min.time()) - SPOT_ACTIVITY_OVERLAP
+            if resume_start > start:
+                self._log(
+                    f"{symbol.symbol}: already completed through {completed_until.isoformat()}; "
+                    f"resuming with overlap at {resume_start.date()}."
+                )
+                start = resume_start
         bounded = self._apply_known_symbol_activity_range(symbol.symbol, start, end)
         if bounded is None:
+            self._mark_spot_symbol_completed(symbol.symbol, start, end)
             return records
         bounded_start, bounded_end = bounded
         if windows is None:
             fast_path_records = self._try_spot_trades_fast_path(symbol, bounded_start, bounded_end)
             if fast_path_records is not None:
+                self._mark_spot_symbol_completed(symbol.symbol, start, end)
                 return fast_path_records
             windows = self._split_by_cached_spot_window(bounded_start, bounded_end)
         started = time.monotonic()
@@ -262,6 +278,7 @@ class BinanceClient(ExchangeClient):
             skipped_cached += skipped
         if skipped_cached:
             self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty spot windows.")
+        self._mark_spot_symbol_completed(symbol.symbol, start, end)
         return records
 
     def _try_spot_trades_fast_path(
@@ -295,6 +312,26 @@ class BinanceClient(ExchangeClient):
         self._log(f"{symbol.symbol}: fast-path loaded {len(rows)} raw spot rows from full bounded range.")
         return self._normalize_spot_rows(symbol, rows)
 
+    def _spot_symbol_completed_key(self, symbol: str, requested_start: datetime) -> str:
+        return f"binance_spot_symbol_completed_until:{symbol}:{requested_start.date().isoformat()}"
+
+    def _load_spot_symbol_completed_until(self, symbol: str, requested_start: datetime):
+        raw = get_sync_state(self._spot_symbol_completed_key(symbol, requested_start))
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw).date()
+        except ValueError:
+            return None
+
+    def _mark_spot_symbol_completed(self, symbol: str, requested_start: datetime, requested_end: datetime) -> None:
+        key = self._spot_symbol_completed_key(symbol, requested_start)
+        current = self._load_spot_symbol_completed_until(symbol, requested_start)
+        completed_date = requested_end.date()
+        if current is None or completed_date > current:
+            set_sync_state(key, completed_date.isoformat())
+            self._log(f"{symbol}: cached completed spot range through {completed_date.isoformat()}.")
+
     def _apply_known_symbol_activity_range(
         self, symbol: str, start: datetime, end: datetime
     ) -> tuple[datetime, datetime] | None:
@@ -314,7 +351,6 @@ class BinanceClient(ExchangeClient):
             if end <= last_end and start <= last_end:
                 bounded_end = min(end, last_end)
             elif start > last_end:
-                # Keep the requested future range open to detect new trades after the cached last trade.
                 bounded_start = start
                 bounded_end = end
         if bounded_start != start or bounded_end != end:
@@ -446,7 +482,8 @@ class BinanceClient(ExchangeClient):
 
     def _remember_spot_accepted_window(self, start: datetime, end: datetime) -> None:
         window_ms = _to_millis(end) - _to_millis(start)
-        if window_ms <= 0:
+        minimum = int(SPOT_MIN_ACCEPTED_WINDOW.total_seconds() * 1000)
+        if window_ms < minimum:
             return
         current = self._load_spot_max_accepted_window_ms()
         if current is None or window_ms > current:
@@ -457,7 +494,7 @@ class BinanceClient(ExchangeClient):
         rejected_ms = _to_millis(end) - _to_millis(start)
         current = self._load_spot_max_accepted_window_ms()
         minimum = int(SPOT_MIN_ACCEPTED_WINDOW.total_seconds() * 1000)
-        if current is not None and rejected_ms <= current:
+        if current is not None and rejected_ms <= current and rejected_ms > minimum:
             reduced = max(rejected_ms // 2, minimum)
             set_sync_state(SPOT_MAX_ACCEPTED_WINDOW_MS_KEY, str(reduced))
             self._log(f"Reduced cached Binance spot range to about {self._millis_to_days(reduced)}d after rejection.")
