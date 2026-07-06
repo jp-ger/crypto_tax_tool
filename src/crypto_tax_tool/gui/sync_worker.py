@@ -12,20 +12,25 @@ class SyncWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, start: datetime, end: datetime) -> None:
+    def __init__(self, start: datetime, end: datetime, full_resync: bool = False) -> None:
         super().__init__()
         self.start = start
         self.end = end
+        self.full_resync = full_resync
 
     @Slot()
     def run(self) -> None:
         try:
             self.log.emit("Creating Binance client")
             client = BinanceClient(progress_callback=self.log.emit)
-            self.log.emit("Starting Binance synchronization")
+            if self.full_resync:
+                self.log.emit("Starting Binance full resync for selected range")
+            else:
+                self.log.emit("Starting Binance synchronization")
             result: SyncResult = SyncService(client, progress_callback=self.log.emit).sync(
                 start=self.start,
                 end=self.end,
+                full_resync=self.full_resync,
             )
         except Exception as exc:  # noqa: BLE001
             message = f"{type(exc).__name__}: {exc}"
