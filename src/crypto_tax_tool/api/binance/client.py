@@ -17,7 +17,7 @@ from crypto_tax_tool.api.binance.normalizers import (
     normalize_transfer,
 )
 from crypto_tax_tool.api.binance.pagination import extract_rows, paginate_numbered
-from crypto_tax_tool.api.binance.spot_sync import TimeWindow, split_into_daily_windows, split_into_monthly_windows
+from crypto_tax_tool.api.binance.spot_sync import TimeWindow, split_into_daily_windows
 from crypto_tax_tool.api.binance.symbols import BinanceSymbol, parse_exchange_info
 from crypto_tax_tool.api.exchange_base import ExchangeClient
 from crypto_tax_tool.database.sqlite_store import get_sync_state, set_sync_state
@@ -35,7 +35,9 @@ UNAVAILABLE_ENDPOINT_PREFIX = "binance_unavailable_endpoint"
 SPOT_MONTHLY_UNSUPPORTED_KEY = "binance_spot_monthly_windows_unsupported"
 SPOT_MAX_ACCEPTED_WINDOW_MS_KEY = "binance_spot_max_accepted_window_ms"
 SPOT_INITIAL_PROBE_WINDOW = timedelta(days=90)
+SPOT_MIN_ACCEPTED_WINDOW = timedelta(days=90)
 SPOT_ACTIVITY_OVERLAP = timedelta(days=1)
+SPOT_LIMIT = 1000
 
 
 def _to_millis(value: datetime) -> int:
@@ -171,12 +173,12 @@ class BinanceClient(ExchangeClient):
             self._log(
                 f"Importing spot trades for {len(traded_symbols)} symbols with cached Binance max "
                 f"spot range of about {self._millis_to_days(cached_window_ms)}d. "
-                "Known symbol activity ranges are used to skip old empty history."
+                "Each symbol is first probed with its full bounded range; cached windows are used only when needed."
             )
         else:
             self._log(
-                f"Importing spot trades for {len(traded_symbols)} symbols with initial "
-                f"{self._window_days(datetime.min, datetime.min + SPOT_INITIAL_PROBE_WINDOW)}d probe windows. "
+                f"Importing spot trades for {len(traded_symbols)} symbols with full-range fast probes and "
+                f"{self._window_days(datetime.min, datetime.min + SPOT_INITIAL_PROBE_WINDOW)}d fallback windows. "
                 "The first accepted Binance spot range and known symbol activity ranges are cached."
             )
         for index, item in enumerate(traded_symbols, start=1):
@@ -238,7 +240,11 @@ class BinanceClient(ExchangeClient):
         if bounded is None:
             return records
         bounded_start, bounded_end = bounded
-        windows = windows or self._split_by_cached_spot_window(bounded_start, bounded_end)
+        if windows is None:
+            fast_path_records = self._try_spot_trades_fast_path(symbol, bounded_start, bounded_end)
+            if fast_path_records is not None:
+                return fast_path_records
+            windows = self._split_by_cached_spot_window(bounded_start, bounded_end)
         started = time.monotonic()
         skipped_cached = 0
         for window_index, window in enumerate(windows, start=1):
@@ -256,6 +262,37 @@ class BinanceClient(ExchangeClient):
         if skipped_cached:
             self._log(f"{symbol.symbol}: skipped {skipped_cached} cached empty spot windows.")
         return records
+
+    def _try_spot_trades_fast_path(
+        self, symbol: BinanceSymbol, start: datetime, end: datetime
+    ) -> list[NormalizedTransaction] | None:
+        cache_key = self._empty_window_key("spot", symbol.symbol, start, end)
+        if get_sync_state(cache_key):
+            self._log(f"{symbol.symbol}: skipped cached full empty spot range.")
+            return []
+        rows = self._request_spot_window(symbol, start, end)
+        if rows is None:
+            self._log(
+                f"{symbol.symbol}: full bounded spot range {self._window_days(start, end)}d rejected; "
+                "using cached/probe windows."
+            )
+            return None
+        self._remember_spot_accepted_window(start, end)
+        if not rows:
+            set_sync_state(cache_key, "1")
+            self._log(f"{symbol.symbol}: no spot trades in full bounded range.")
+            return []
+        if len(rows) >= SPOT_LIMIT and not self._is_daily_window(start, end):
+            self._log(
+                f"{symbol.symbol}: full bounded range returned {len(rows)} rows; "
+                "falling back to split windows to avoid Binance's 1000-row cap."
+            )
+            return None
+        if len(rows) >= SPOT_LIMIT:
+            self._log(f"WARNING {symbol.symbol}: full daily spot range returned 1000 rows; Binance may have more rows.")
+        self._update_symbol_trade_range(symbol.symbol, rows)
+        self._log(f"{symbol.symbol}: fast-path loaded {len(rows)} raw spot rows from full bounded range.")
+        return self._normalize_spot_rows(symbol, rows)
 
     def _apply_known_symbol_activity_range(
         self, symbol: str, start: datetime, end: datetime
@@ -319,11 +356,11 @@ class BinanceClient(ExchangeClient):
         if not rows:
             set_sync_state(cache_key, "1")
             return [], 0
-        if len(rows) >= 1000 and not self._is_daily_window(start, end):
-            self._log(f"{symbol.symbol}: {self._window_days(start, end)}d spot range hit 1000 rows; splitting.")
+        if len(rows) >= SPOT_LIMIT and not self._is_daily_window(start, end):
+            self._log(f"{symbol.symbol}: {self._window_days(start, end)}d spot range hit {SPOT_LIMIT} rows; splitting.")
             return self._split_spot_range(symbol, start, end, depth)
-        if len(rows) >= 1000:
-            self._log(f"WARNING {symbol.symbol}: one daily spot window returned 1000 rows; Binance may have more rows.")
+        if len(rows) >= SPOT_LIMIT:
+            self._log(f"WARNING {symbol.symbol}: one daily spot window returned {SPOT_LIMIT} rows; Binance may have more rows.")
         self._update_symbol_trade_range(symbol.symbol, rows)
         self._log(f"{symbol.symbol}: found {len(rows)} raw trade rows in spot range.")
         return self._normalize_spot_rows(symbol, rows), 0
@@ -350,7 +387,7 @@ class BinanceClient(ExchangeClient):
         try:
             rows = self._signed_get(
                 "/api/v3/myTrades",
-                {"symbol": symbol.symbol, "startTime": _to_millis(start), "endTime": _to_millis(end), "limit": 1000},
+                {"symbol": symbol.symbol, "startTime": _to_millis(start), "endTime": _to_millis(end), "limit": SPOT_LIMIT},
             )
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 400 and not self._is_daily_window(start, end):
@@ -401,6 +438,9 @@ class BinanceClient(ExchangeClient):
             value = int(raw)
         except ValueError:
             return None
+        minimum = int(SPOT_MIN_ACCEPTED_WINDOW.total_seconds() * 1000)
+        if value < minimum:
+            return None
         return value if value > 0 else None
 
     def _remember_spot_accepted_window(self, start: datetime, end: datetime) -> None:
@@ -415,8 +455,9 @@ class BinanceClient(ExchangeClient):
     def _record_rejected_spot_window(self, start: datetime, end: datetime) -> None:
         rejected_ms = _to_millis(end) - _to_millis(start)
         current = self._load_spot_max_accepted_window_ms()
+        minimum = int(SPOT_MIN_ACCEPTED_WINDOW.total_seconds() * 1000)
         if current is not None and rejected_ms <= current:
-            reduced = max(rejected_ms // 2, int(timedelta(days=1).total_seconds() * 1000))
+            reduced = max(rejected_ms // 2, minimum)
             set_sync_state(SPOT_MAX_ACCEPTED_WINDOW_MS_KEY, str(reduced))
             self._log(f"Reduced cached Binance spot range to about {self._millis_to_days(reduced)}d after rejection.")
 
