@@ -4,13 +4,13 @@ from decimal import Decimal
 from crypto_tax_tool.services.binance_price_provider import BinanceHistoricalPriceProvider
 
 
-def test_eur_stablecoin_price_is_one() -> None:
+def test_same_asset_price_is_one() -> None:
     provider = BinanceHistoricalPriceProvider()
     price = provider.get_price("EUR", "EUR", datetime(2025, 1, 1, tzinfo=UTC))
 
     assert price is not None
     assert price.price == Decimal("1")
-    assert price.provider == "stablecoin_fallback"
+    assert price.provider == "same_asset"
 
 
 def test_usd_stablecoin_uses_eurusdt_inverse(monkeypatch) -> None:
