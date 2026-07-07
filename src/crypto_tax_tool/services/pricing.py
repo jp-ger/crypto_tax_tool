@@ -40,20 +40,28 @@ class StaticPriceProvider(PriceProvider):
 class HistoricalPriceService:
     def __init__(self, providers: list[PriceProvider] | None = None) -> None:
         self.providers = providers or []
+        self._cache: dict[tuple[str, str, datetime], HistoricalPrice] = {}
 
     def get_price(self, asset: str, quote_asset: str, timestamp: datetime) -> HistoricalPrice:
         lookup_timestamp = _hour_floor(timestamp)
+        cache_key = (asset.upper(), quote_asset.upper(), lookup_timestamp)
+        cached_in_memory = self._cache.get(cache_key)
+        if cached_in_memory:
+            return cached_in_memory
         manual = get_manual_price(asset, quote_asset, lookup_timestamp)
         if manual:
+            self._cache[cache_key] = manual
             return manual
 
         cached = get_cached_price(asset, quote_asset, lookup_timestamp)
         if cached:
+            self._cache[cache_key] = cached
             return cached
 
         for provider in self.providers:
             price = provider.get_price(asset, quote_asset, lookup_timestamp)
             if price:
+                self._cache[cache_key] = price
                 save_price(price)
                 return price
 
