@@ -83,7 +83,7 @@ class SyncService:
     def _sync_and_save_staged(self, start: datetime, end: datetime, full_resync: bool = False) -> tuple[int, int]:
         effective_start = start
         if not full_resync and hasattr(self.exchange_client, "_effective_sync_start"):
-            effective_start = self.exchange_client._effective_sync_start(start)  # noqa: SLF001
+            effective_start = self.exchange_client._effective_sync_start(start, end)  # noqa: SLF001
 
         self._log(f"Staged sync range: {effective_start.isoformat()} to {end.isoformat()}")
         stages = [

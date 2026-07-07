@@ -90,7 +90,7 @@ class BinanceClient(ExchangeClient):
         return normalize_account_balances(payload)
 
     def sync_transactions(self, start: datetime, end: datetime) -> list[NormalizedTransaction]:
-        start = self._effective_sync_start(start)
+        start = self._effective_sync_start(start, end)
         self._log(f"Binance transaction sync range: {start.isoformat()} to {end.isoformat()}")
         records: list[NormalizedTransaction] = []
         self._log("Syncing deposits and withdrawals first to identify involved assets...")
@@ -116,7 +116,7 @@ class BinanceClient(ExchangeClient):
         self._log(f"All Binance transaction loaders completed. Total rows: {len(records)}.")
         return records
 
-    def _effective_sync_start(self, requested_start: datetime) -> datetime:
+    def _effective_sync_start(self, requested_start: datetime, requested_end: datetime) -> datetime:
         start = max(requested_start, BINANCE_SPOT_HISTORY_START)
         if requested_start < BINANCE_SPOT_HISTORY_START:
             self._log(
@@ -135,6 +135,12 @@ class BinanceClient(ExchangeClient):
             self._log("Previous sync state could not be parsed. Running selected range.")
             return start
         incremental_start = max(start, last_end - INCREMENTAL_OVERLAP)
+        if incremental_start >= requested_end:
+            self._log(
+                "Previous sync state already covers or extends beyond the selected range. "
+                "Using explicitly selected start date to avoid invalid sync range."
+            )
+            return start
         if incremental_start > start:
             self._log(
                 "Incremental sync enabled. "
@@ -224,7 +230,7 @@ class BinanceClient(ExchangeClient):
         windows: list[TimeWindow] | None = None,
     ) -> list[NormalizedTransaction]:
         records: list[NormalizedTransaction] = []
-        completed_until = self._load_spot_symbol_completed_until(symbol.symbol, start)
+        completed_until = self._load_spot_symbol_completed_until(symbol.symbol)
         if completed_until is not None and completed_until >= end.date():
             self._log(f"{symbol.symbol}: selected spot range already completed through {completed_until.isoformat()}; skipping.")
             return records
@@ -239,11 +245,11 @@ class BinanceClient(ExchangeClient):
         if windows is None and not self._has_known_symbol_activity_range(symbol.symbol):
             fast_path_records = self._try_spot_latest_trades_fast_path(symbol)
             if fast_path_records is not None:
-                self._mark_spot_symbol_completed(symbol.symbol, start, end)
+                self._mark_spot_symbol_completed(symbol.symbol, end)
                 return fast_path_records
         bounded = self._apply_known_symbol_activity_range(symbol.symbol, start, end)
         if bounded is None:
-            self._mark_spot_symbol_completed(symbol.symbol, start, end)
+            self._mark_spot_symbol_completed(symbol.symbol, end)
             return records
         bounded_start, bounded_end = bounded
         windows = windows or self._split_into_fixed_spot_windows(bounded_start, bounded_end)
@@ -339,7 +345,7 @@ class BinanceClient(ExchangeClient):
 
     def _mark_spot_symbol_completed(self, symbol: str, requested_start: datetime, requested_end: datetime) -> None:
         key = self._spot_symbol_completed_key(symbol, requested_start)
-        current = self._load_spot_symbol_completed_until(symbol, requested_start)
+        current = self._load_spot_symbol_completed_until(symbol)
         completed_date = requested_end.date()
         if current is None or completed_date > current:
             set_sync_state(key, completed_date.isoformat())
