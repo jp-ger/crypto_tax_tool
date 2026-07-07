@@ -155,3 +155,27 @@ def test_sell_fee_reduces_proceeds(tmp_path, monkeypatch) -> None:
     assert result.disposals[0].fee_eur == Decimal("10")
     assert result.disposals[0].proceeds_eur == Decimal("4990")
     assert result.disposals[0].gain_eur == Decimal("1990")
+
+
+def test_missing_inventory_is_collected_instead_of_raising(tmp_path, monkeypatch) -> None:
+    engine = _engine(tmp_path, monkeypatch)
+    sell = _tx(
+        source_id="sell_missing",
+        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+        asset="USDC",
+        quantity=Decimal("125"),
+        quote_asset="ACE",
+        quote_quantity=Decimal("12.5"),
+        side=TradeSide.SELL,
+    )
+
+    result = engine.calculate([sell])
+
+    assert len(result.disposals) == 1
+    assert result.disposals[0].asset == "ACE"
+    assert result.disposals[0].matches == []
+    assert result.disposals[0].proceeds_eur == Decimal("125")
+    assert result.disposals[0].cost_basis_eur == Decimal("0")
+    assert len(result.missing_inventory_issues or []) == 1
+    assert result.missing_inventory_issues[0].asset == "ACE"
+    assert result.missing_inventory_issues[0].missing_quantity == Decimal("12.5")
