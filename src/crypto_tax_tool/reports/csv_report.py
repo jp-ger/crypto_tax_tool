@@ -2,6 +2,7 @@ import csv
 from decimal import Decimal
 from pathlib import Path
 
+from crypto_tax_tool.services.tax_engine import MissingInventoryIssue
 from crypto_tax_tool.services.tax_summary import TaxSummary
 
 
@@ -82,6 +83,48 @@ class CsvIncomeReportExporter:
                         row.raw_type,
                         row.price_provider,
                         row.price_pair,
+                    ]
+                )
+        return path
+
+
+class CsvMissingInventoryExporter:
+    def export(
+        self,
+        issues: list[MissingInventoryIssue],
+        path: Path,
+        number_format: str = "international",
+    ) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(
+                [
+                    "transaction_id",
+                    "disposed_at",
+                    "asset",
+                    "missing_quantity",
+                    "disposed_quantity",
+                    "proceeds_eur",
+                    "product",
+                    "raw_type",
+                    "message",
+                    "suggested_action",
+                ]
+            )
+            for issue in issues:
+                writer.writerow(
+                    [
+                        issue.transaction_id,
+                        issue.disposed_at.isoformat() if issue.disposed_at else "",
+                        issue.asset,
+                        _format_decimal(issue.missing_quantity, number_format),
+                        _format_decimal(issue.disposed_quantity, number_format),
+                        _format_decimal(issue.proceeds_eur, number_format),
+                        issue.product,
+                        issue.raw_type,
+                        issue.message,
+                        "Add manual FIFO lot or verify missing Binance import; ignore only if immaterial.",
                     ]
                 )
         return path
