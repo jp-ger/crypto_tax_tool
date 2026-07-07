@@ -4,6 +4,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from crypto_tax_tool.models.fifo_state import AssetLot
+from crypto_tax_tool.services.tax_engine import MissingInventoryIssue
 from crypto_tax_tool.services.tax_summary import TaxSummary
 
 
@@ -34,6 +35,7 @@ class ExcelTaxReportExporter:
         path: Path,
         open_lots: list[AssetLot] | None = None,
         number_format: str = "international",
+        missing_inventory_issues: list[MissingInventoryIssue] | None = None,
     ) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         workbook = Workbook()
@@ -47,10 +49,11 @@ class ExcelTaxReportExporter:
             ["Total disposal gain EUR", _excel_number(summary.total_gain_eur)],
             ["Taxable income EUR", _excel_number(summary.taxable_income_eur)],
             ["Total taxable EUR", _excel_number(summary.total_taxable_eur)],
+            ["Missing inventory issues", len(missing_inventory_issues or [])],
         ]
         for row in summary_rows:
             sheet.append(row)
-        for cell in sheet["B"][1:]:
+        for cell in sheet["B"][1:6]:
             cell.number_format = _eur_style(number_format)
 
         details = workbook.create_sheet("Disposals")
@@ -149,6 +152,41 @@ class ExcelTaxReportExporter:
             lots_sheet.cell(row=row_idx, column=4).number_format = _number_style(number_format)
             lots_sheet.cell(row=row_idx, column=5).number_format = _number_style(number_format)
             lots_sheet.cell(row=row_idx, column=6).number_format = _eur_style(number_format)
+
+        missing_sheet = workbook.create_sheet("Missing Inventory")
+        missing_sheet.append(
+            [
+                "Transaction ID",
+                "Disposed At",
+                "Asset",
+                "Missing Quantity",
+                "Disposed Quantity",
+                "Proceeds EUR",
+                "Product",
+                "Type",
+                "Message",
+                "Suggested Action",
+            ]
+        )
+        for issue in missing_inventory_issues or []:
+            missing_sheet.append(
+                [
+                    issue.transaction_id,
+                    issue.disposed_at.isoformat() if issue.disposed_at else "",
+                    issue.asset,
+                    _excel_number(issue.missing_quantity),
+                    _excel_number(issue.disposed_quantity),
+                    _excel_number(issue.proceeds_eur),
+                    issue.product,
+                    issue.raw_type,
+                    issue.message,
+                    "Add manual FIFO lot or verify missing Binance import; ignore only if immaterial.",
+                ]
+            )
+        for row_idx in range(2, missing_sheet.max_row + 1):
+            missing_sheet.cell(row=row_idx, column=4).number_format = _number_style(number_format)
+            missing_sheet.cell(row=row_idx, column=5).number_format = _number_style(number_format)
+            missing_sheet.cell(row=row_idx, column=6).number_format = _eur_style(number_format)
 
         workbook.save(path)
         return path
