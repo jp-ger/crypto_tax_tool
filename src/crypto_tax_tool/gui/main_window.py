@@ -346,7 +346,7 @@ class MainWindow(QMainWindow):
         self.sync_worker = SyncWorker(start=start, end=end, full_resync=full_resync)
         self.sync_worker.moveToThread(self.sync_thread)
         self.sync_thread.started.connect(self.sync_worker.run)
-        self.sync_worker.progress.connect(self._append_log)
+        self.sync_worker.log.connect(self._append_log)
         self.sync_worker.finished.connect(self._sync_finished)
         self.sync_worker.failed.connect(self._sync_failed)
         self.sync_worker.finished.connect(self.sync_thread.quit)

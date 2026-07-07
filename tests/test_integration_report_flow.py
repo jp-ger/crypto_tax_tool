@@ -130,3 +130,47 @@ def test_report_date_range_filters_disposals(tmp_path, monkeypatch) -> None:
     assert result.disposals == 0
     csv_content = result.summary_csv.read_text(encoding="utf-8")
     assert "sell_btc_1" not in csv_content
+
+
+def test_report_generation_handles_missing_inventory_without_acquisition_history(tmp_path, monkeypatch) -> None:
+    _prepare_db(tmp_path, monkeypatch)
+    price_time = datetime(2025, 1, 2, tzinfo=UTC)
+    save_manual_price(
+        ManualPriceEntry(
+            asset="BTC",
+            quote_asset="EUR",
+            timestamp=price_time,
+            price=Decimal("30000"),
+            reason="Missing inventory price.",
+        )
+    )
+    sell_tx = _tx(
+        id="sell_btc_missing_history",
+        source_id="sell_btc_missing_history",
+        timestamp=price_time,
+        asset="EUR",
+        quantity=Decimal("3000"),
+        quote_asset="BTC",
+        quote_quantity=Decimal("0.1"),
+        side=TradeSide.SELL,
+        tax_category=TaxCategory.PRIVATE_DISPOSAL,
+    )
+    save_transactions([sell_tx])
+    save_balance_snapshot(
+        BalanceSnapshot(
+            source=TransactionSource.BINANCE,
+            balances=[AssetBalance(asset="BTC", free=Decimal("0"), locked=Decimal("0"))],
+        )
+    )
+
+    result = ReportGenerationService().generate_tax_report(output_dir=tmp_path / "missing_inventory_report")
+
+    assert result.transactions == 1
+    assert result.disposals == 1
+    assert result.open_lots == 0
+    assert result.missing_inventory_issues >= 1
+    assert result.missing_inventory_csv.exists()
+    missing_inventory_content = result.missing_inventory_csv.read_text(encoding="utf-8")
+    assert "BTC" in missing_inventory_content
+    assert "sell_btc_missing_history" in result.missing_inventory_csv.read_text(encoding="utf-8")
+    assert not result.validation_report.errors

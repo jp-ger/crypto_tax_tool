@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from crypto_tax_tool.models.enums import TradeSide
 from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
 from crypto_tax_tool.models.transactions import NormalizedTransaction
 from crypto_tax_tool.services.fee_service import FeeService
@@ -156,8 +157,12 @@ class TaxEngine:
         )
 
     def _create_disposal(self, tx: NormalizedTransaction) -> DisposalResult:
-        disposed_asset = tx.quote_asset or tx.asset
-        disposed_quantity = tx.quote_quantity or tx.quantity
+        if tx.side == TradeSide.SELL:
+            disposed_asset = tx.quote_asset or tx.asset
+            disposed_quantity = tx.quote_quantity or tx.quantity
+        else:
+            disposed_asset = tx.asset
+            disposed_quantity = tx.quantity
         if tx.asset == "EUR":
             gross_proceeds_eur = tx.quantity
         else:
