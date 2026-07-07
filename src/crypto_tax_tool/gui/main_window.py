@@ -357,7 +357,7 @@ class MainWindow(QMainWindow):
     def _sync_finished(self, summary) -> None:
         self.status_label.setText("Sync finished.")
         self._append_log(
-            f"Sync finished: {summary.transactions_imported} transactions, {summary.balances_imported} balance rows."
+            f"Sync finished: {summary.inserted} transactions, {summary.balance_rows} balance rows."
         )
         self._refresh_count()
         self.sync_button.setEnabled(True)

@@ -57,12 +57,16 @@ class ReportGenerationService:
         backup = BackupService().create_backup("before_report")
         transactions = load_transactions()
         manual_lots = load_manual_lots()
+        # Prefetch historical prices used by the tax engine to avoid repeated
+        # DB/API lookups during calculation. Collect unique (asset, quote, hour)
+        # tuples and request them once.
+        price_service = HistoricalPriceService(providers=[BinanceHistoricalPriceProvider()])
+        self._prefetch_prices(transactions, manual_lots, price_service)
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         if output_dir is None:
             output_dir = get_settings().data_dir / "reports" / f"tax_report_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        price_service = HistoricalPriceService(providers=[BinanceHistoricalPriceProvider()])
         full_calculation = TaxEngine(price_service, initial_lots=manual_lots).calculate(transactions)
         calculation = self._filter_calculation(full_calculation, report_start, report_end)
         summary = TaxSummaryService().build_summary(calculation)
@@ -155,6 +159,41 @@ class ReportGenerationService:
             income_events=income_events,
             missing_inventory_issues=missing_inventory_issues,
         )
+
+    def _prefetch_prices(self, transactions: list, manual_lots: list, price_service: HistoricalPriceService) -> None:
+        from crypto_tax_tool.services.pricing import PriceNotFoundError
+
+        keys: set[tuple[str, str]] = set()
+        # For each transaction, we need the asset->EUR price. If a quote_asset exists
+        # and is not EUR, also prefetch quote_asset->EUR since the engine may use it.
+        for tx in transactions:
+            asset = getattr(tx, "asset", None)
+            if asset:
+                keys.add((asset.upper(), "EUR"))
+            quote = getattr(tx, "quote_asset", None)
+            if quote and quote.upper() != "EUR":
+                keys.add((quote.upper(), "EUR"))
+
+        # Manual lots may reference assets that appear as open lots; ensure their prices are available.
+        for lot in manual_lots:
+            keys.add((lot.asset.upper(), "EUR"))
+
+        # Request prices for the hour-floor of each transaction timestamp.
+        # Use the price_service.get_price which will save/cache prices.
+        timestamps_by_asset: dict[tuple[str, str], set] = {}
+        for tx in transactions:
+            ts = tx.timestamp
+            for asset_key in list(keys):
+                asset_name, quote = asset_key
+                timestamps_by_asset.setdefault(asset_key, set()).add(ts)
+
+        for (asset, quote), ts_set in timestamps_by_asset.items():
+            for ts in sorted(ts_set):
+                try:
+                    price_service.get_price(asset, quote, ts)
+                except PriceNotFoundError:
+                    # Missing price for this hour — leave it to the engine which will raise if needed.
+                    continue
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
