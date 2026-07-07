@@ -263,13 +263,21 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Report failed: {exc}")
             self._append_log(f"Report failed: {exc}")
         else:
-            self.status_label.setText("Report created.")
+            missing_count = getattr(result, "missing_inventory_issues", 0)
+            if missing_count:
+                self.status_label.setText(f"Report created with {missing_count} missing inventory issue(s).")
+            else:
+                self.status_label.setText("Report created.")
             income_count = getattr(result, "income_events", 0)
             self._append_log(
                 f"Report created for {report_start.date()} to {report_end.date()}: {result.output_dir} | "
                 f"number format: {number_format}, transactions: {result.transactions}, disposals: {result.disposals}, "
-                f"income events: {income_count}, open lots: {result.open_lots}, manual lots: {result.manual_lots}"
+                f"income events: {income_count}, open lots: {result.open_lots}, manual lots: {result.manual_lots}, "
+                f"missing inventory issues: {missing_count}"
             )
+            if missing_count:
+                self._append_log(f"Missing inventory details: {result.missing_inventory_csv}")
+                self._append_log("Review the Missing Inventory Excel sheet or CSV. Add manual FIFO lots for material amounts.")
             if result.backup_path:
                 self._append_log(f"Backup before report: {result.backup_path}")
             for issue in result.validation_report.warnings:
@@ -338,30 +346,25 @@ class MainWindow(QMainWindow):
         self.sync_worker = SyncWorker(start=start, end=end, full_resync=full_resync)
         self.sync_worker.moveToThread(self.sync_thread)
         self.sync_thread.started.connect(self.sync_worker.run)
-        self.sync_worker.log.connect(self._append_log)
+        self.sync_worker.progress.connect(self._append_log)
         self.sync_worker.finished.connect(self._sync_finished)
         self.sync_worker.failed.connect(self._sync_failed)
         self.sync_worker.finished.connect(self.sync_thread.quit)
         self.sync_worker.failed.connect(self.sync_thread.quit)
-        self.sync_thread.finished.connect(self._sync_thread_finished)
+        self.sync_thread.finished.connect(self.sync_thread.deleteLater)
         self.sync_thread.start()
 
-    def _sync_finished(self, result) -> None:
-        self.status_label.setText("Sync completed.")
+    def _sync_finished(self, summary) -> None:
+        self.status_label.setText("Sync finished.")
         self._append_log(
-            f"Sync completed. Loaded: {result.loaded}, inserted: {result.inserted}, "
-            f"balance rows: {result.balance_rows}"
+            f"Sync finished: {summary.transactions_imported} transactions, {summary.balances_imported} balance rows."
         )
-        if result.backup_path:
-            self._append_log(f"Backup before sync: {result.backup_path}")
         self._refresh_count()
+        self.sync_button.setEnabled(True)
+        self.full_resync_button.setEnabled(True)
 
     def _sync_failed(self, message: str) -> None:
         self.status_label.setText(f"Sync failed: {message}")
         self._append_log(f"Sync failed: {message}")
-
-    def _sync_thread_finished(self) -> None:
         self.sync_button.setEnabled(True)
         self.full_resync_button.setEnabled(True)
-        self.sync_worker = None
-        self.sync_thread = None
