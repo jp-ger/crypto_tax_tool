@@ -6,7 +6,18 @@ from crypto_tax_tool.models.fifo_state import AssetLot, LotUsage
 
 
 class InsufficientInventoryError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        asset: str,
+        missing_quantity: Decimal,
+        requested_quantity: Decimal,
+        matches: list[LotUsage] | None = None,
+    ) -> None:
+        self.asset = asset
+        self.missing_quantity = missing_quantity
+        self.requested_quantity = requested_quantity
+        self.matches = matches or []
+        super().__init__(f"Not enough inventory for {asset}: missing {missing_quantity}.")
 
 
 class FifoEngine:
@@ -27,7 +38,12 @@ class FifoEngine:
 
         while remaining > 0:
             if not lots:
-                raise InsufficientInventoryError(f"Not enough inventory for {asset}: missing {remaining}.")
+                raise InsufficientInventoryError(
+                    asset=asset,
+                    missing_quantity=remaining,
+                    requested_quantity=quantity,
+                    matches=result,
+                )
             lot = lots[0]
             used_quantity = min(lot.remaining_quantity, remaining)
             cost_share = lot.cost_basis_eur * used_quantity / lot.remaining_quantity

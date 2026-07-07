@@ -5,7 +5,7 @@ from pathlib import Path
 from crypto_tax_tool.database.loaders import load_transactions
 from crypto_tax_tool.database.manual_store import load_manual_lots
 from crypto_tax_tool.reports.audit_report import AuditCsvExporter
-from crypto_tax_tool.reports.csv_report import CsvIncomeReportExporter, CsvTaxReportExporter
+from crypto_tax_tool.reports.csv_report import CsvIncomeReportExporter, CsvMissingInventoryExporter, CsvTaxReportExporter
 from crypto_tax_tool.reports.excel_report import ExcelTaxReportExporter
 from crypto_tax_tool.services.audit_service import AuditTrailService
 from crypto_tax_tool.services.backup_service import BackupService
@@ -31,6 +31,7 @@ class ReportGenerationResult:
     summary_xlsx: Path
     audit_csv: Path
     income_csv: Path
+    missing_inventory_csv: Path
     transactions: int
     disposals: int
     income_events: int
@@ -38,6 +39,7 @@ class ReportGenerationResult:
     validation_report: ValidationReport
     backup_path: Path | None
     manual_lots: int
+    missing_inventory_issues: int
 
 
 class ReportGenerationService:
@@ -65,6 +67,7 @@ class ReportGenerationService:
         calculation = self._filter_calculation(full_calculation, report_start, report_end)
         summary = TaxSummaryService().build_summary(calculation)
         audit_records = AuditTrailService().build_report_audit(calculation)
+        missing_inventory_issues = calculation.missing_inventory_issues or []
 
         summary_csv = CsvTaxReportExporter().export(
             summary, output_dir / "tax_summary.csv", number_format=number_format
@@ -72,11 +75,17 @@ class ReportGenerationService:
         income_csv = CsvIncomeReportExporter().export(
             summary, output_dir / "taxable_income.csv", number_format=number_format
         )
+        missing_inventory_csv = CsvMissingInventoryExporter().export(
+            missing_inventory_issues,
+            output_dir / "missing_inventory.csv",
+            number_format=number_format,
+        )
         summary_xlsx = ExcelTaxReportExporter().export(
             summary,
             output_dir / "tax_report.xlsx",
             calculation.open_lots,
             number_format=number_format,
+            missing_inventory_issues=missing_inventory_issues,
         )
         audit_csv = AuditCsvExporter().export(audit_records, output_dir / "audit_trail.csv")
 
@@ -86,6 +95,7 @@ class ReportGenerationService:
             summary_xlsx=summary_xlsx,
             audit_csv=audit_csv,
             income_csv=income_csv,
+            missing_inventory_csv=missing_inventory_csv,
             transactions=len(transactions),
             disposals=len(calculation.disposals),
             income_events=len(calculation.income_events or []),
@@ -93,6 +103,7 @@ class ReportGenerationService:
             validation_report=validation_report,
             backup_path=backup.path,
             manual_lots=len(manual_lots),
+            missing_inventory_issues=len(missing_inventory_issues),
         )
 
     @staticmethod
@@ -127,10 +138,22 @@ class ReportGenerationService:
             if report_end is not None and received_at > report_end:
                 continue
             income_events.append(income)
+        missing_inventory_issues = []
+        for issue in calculation.missing_inventory_issues or []:
+            disposed_at = _as_utc(issue.disposed_at)
+            if disposed_at is None:
+                missing_inventory_issues.append(issue)
+                continue
+            if report_start is not None and disposed_at < report_start:
+                continue
+            if report_end is not None and disposed_at > report_end:
+                continue
+            missing_inventory_issues.append(issue)
         return TaxCalculationResult(
             disposals=disposals,
             open_lots=calculation.open_lots,
             income_events=income_events,
+            missing_inventory_issues=missing_inventory_issues,
         )
 
 
